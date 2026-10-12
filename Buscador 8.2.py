@@ -51,7 +51,7 @@ class BuscadorPNCP(ctk.CTk):
         # ------------------------------------------------------------------
         # COLOQUE AQUI A SUA URL DA VERCEL (com o /api/valida no final)
         # ------------------------------------------------------------------
-        self.url_api_licenca = "https://SUA-URL-AQUI.vercel.app/api/valida"
+        self.url_api_licenca = "https://meu-validador-licencas.vercel.app/api/valida"
 
         self.db_path = "licitacoes_pncp_v9.db"
 
