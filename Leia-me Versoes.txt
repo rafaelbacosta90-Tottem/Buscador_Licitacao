@@ -1,0 +1,4 @@
+Versoes
+7.1 - Adicionado visualização dos arquivos do edital
+7.2 - Correção borao exportar
+7.2.2 - adicionado filtro item ou objeto e portal
