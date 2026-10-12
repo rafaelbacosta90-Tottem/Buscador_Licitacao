@@ -18,6 +18,7 @@ import requests
 ctk.set_appearance_mode("Light")
 ctk.set_default_color_theme("blue")
 
+versao = "8.3.1"
 
 def normalizar_texto(texto: str) -> str:
     if not texto: return ""
@@ -158,7 +159,6 @@ class BuscadorPNCP(ctk.CTk):
 
     def iniciar_sistema_principal(self):
         self.deiconify() 
-        # Maximizar a janela no arranque
         try:
             self.state('zoomed')
         except:
@@ -582,7 +582,7 @@ class BuscadorPNCP(ctk.CTk):
 
     def _buscar_arquivos_thread(self, url):
         try:
-            res = self._get_com_retentativa(url, params={"pagina": 1, "tamanhoPagina": 100}, timeout=10, tipo_operacao="busca")
+            res = self._get_com_retentativa(url, params={"pagina": 1, "tamanhoPagina": 100}, timeout=15, tipo_operacao="busca")
             if res and res.status_code == 200:
                 dados = res.json()
                 self.after(0, lambda: self.mostrar_janela_arquivos(dados.get("data", []) if isinstance(dados, dict) else (dados if isinstance(dados, list) else [])))
@@ -632,9 +632,12 @@ class BuscadorPNCP(ctk.CTk):
     def _get_com_retentativa(self, url, params, max_tentativas=3, timeout=15, tipo_operacao="busca"):
         for tentativa in range(1, max_tentativas + 1):
             if (self.cancelar_busca if tipo_operacao == "busca" else self.cancelar_carga): return None
-            try: return self.http_session.get(url, params=params, timeout=timeout)
+            try: 
+                return self.http_session.get(url, params=params, timeout=timeout)
             except Exception as e:
-                if tentativa == max_tentativas or (self.cancelar_busca if tipo_operacao == "busca" else self.cancelar_carga): raise e
+                if tentativa == max_tentativas or (self.cancelar_busca if tipo_operacao == "busca" else self.cancelar_carga): 
+                    raise e
+                self.registrar_log(f"⏳ Instabilidade na rede. Tentativa {tentativa}/{max_tentativas} aguardando...")
                 for _ in range(30):
                     if (self.cancelar_busca if tipo_operacao == "busca" else self.cancelar_carga): return None
                     time.sleep(0.1)
@@ -663,7 +666,7 @@ class BuscadorPNCP(ctk.CTk):
                 if uf_selecionada != "Todas": params["uf"] = uf_selecionada
 
                 try:
-                    res = self._get_com_retentativa(url_base, params=params, timeout=15, tipo_operacao="carga")
+                    res = self._get_com_retentativa(url_base, params=params, timeout=30, tipo_operacao="carga")
                     if not res or res.status_code != 200: break 
                     
                     lista_contratos = res.json().get("data", []) or []
@@ -779,38 +782,44 @@ class BuscadorPNCP(ctk.CTk):
                 pag_item = 1
                 while True:
                     if (self.cancelar_busca if tipo_operacao == "busca" else self.cancelar_carga): break
-                    res_i = self._get_com_retentativa(f"https://pncp.gov.br/api/pncp/v1/orgaos/{cnpj}/compras/{ano}/{seq}/itens", {"pagina": pag_item, "tamanhoPagina": 500}, timeout=10, tipo_operacao=tipo_operacao)
-                    if not res_i or res_i.status_code != 200: break
-                    
-                    itens_json = res_i.json()
-                    for it in (itens_json.get("data", []) if isinstance(itens_json, dict) else itens_json):
-                        if (self.cancelar_busca if tipo_operacao == "busca" else self.cancelar_carga): break
-                        num_item = it.get("numeroItem", 0)
-                        mat_nome = it.get("materialOuServicoNome", "") or (it.get("materialOuServico").get("nome", "") if isinstance(it.get("materialOuServico"), dict) else "")
-                        desc_bruta = it.get("descricao", "")
-                        desc_item = f"{mat_nome} - {desc_bruta}" if mat_nome and desc_bruta else (mat_nome or desc_bruta or objeto_contrato)
+                    try:
+                        time.sleep(0.05) 
+                        # Aumentado o timeout de 10 para 25 segundos para suportar editais gigantes
+                        res_i = self._get_com_retentativa(f"https://pncp.gov.br/api/pncp/v1/orgaos/{cnpj}/compras/{ano}/{seq}/itens", {"pagina": pag_item, "tamanhoPagina": 500}, timeout=25, tipo_operacao=tipo_operacao)
+                        if not res_i or res_i.status_code != 200: break
                         
-                        if radicais_busca and not contem_palavras_chave(desc_item if alvo_busca == "Apenas no Item" else (objeto_contrato if alvo_busca == "Apenas no Objeto do Edital" else f"{desc_item} {objeto_contrato}"), radicais_busca): continue
+                        itens_json = res_i.json()
+                        for it in (itens_json.get("data", []) if isinstance(itens_json, dict) else itens_json):
+                            if (self.cancelar_busca if tipo_operacao == "busca" else self.cancelar_carga): break
+                            num_item = it.get("numeroItem", 0)
+                            mat_nome = it.get("materialOuServicoNome", "") or (it.get("materialOuServico").get("nome", "") if isinstance(it.get("materialOuServico"), dict) else "")
+                            desc_bruta = it.get("descricao", "")
+                            desc_item = f"{mat_nome} - {desc_bruta}" if mat_nome and desc_bruta else (mat_nome or desc_bruta or objeto_contrato)
+                            
+                            if radicais_busca and not contem_palavras_chave(desc_item if alvo_busca == "Apenas no Item" else (objeto_contrato if alvo_busca == "Apenas no Objeto do Edital" else f"{desc_item} {objeto_contrato}"), radicais_busca): continue
 
-                        chave_u = f"{cnpj}_{ano}_{seq}_{num_item}"
-                        if chave_u not in chaves_cadastradas:
-                            chaves_cadastradas.add(chave_u)
-                            qtd, v_u_est, v_t_est, v_u_hom, v_t_hom = float(it.get("quantidade", 1)), it.get("valorUnitarioEstimado"), it.get("valorTotalEstimado"), it.get("valorUnitarioHomologado"), it.get("valorTotalHomologado") or it.get("valorTotal")
-                            reg = {"Orgao": orgao, "UF": uf, "ObjetoContrato": objeto_contrato, "DescItem": desc_item, "Qtd": qtd, "Vlr Unit Est": self.formatar_moeda(v_u_est), "Vlr Total Est": self.formatar_moeda(v_t_est), "Vlr Unit Hom": self.formatar_moeda(v_u_hom), "Vlr Total Hom": self.formatar_moeda(v_t_hom), "Data Pub": data_pub, "CNPJ": cnpj, "Ano": ano, "Sequencial": seq, "NumeroItem": num_item, "ModalidadeID": str(cod_modalidade), "ModalidadeNome": mod_nome, "PortalNome": portal_nome}
-                            
-                            if tipo_operacao == "busca" or (tipo_operacao == "carga" and self.mostrar_carga_no_grid):
-                                self.resultados_pncp.append(reg)
-                                self.after(0, lambda r=reg: self._adicionar_item_tabela(r["Orgao"], r["UF"], r["PortalNome"], f"{r['Sequencial']}/{r['Ano']}", r["DescItem"], r["Qtd"], r["Vlr Unit Est"], r["Vlr Total Est"], r["Vlr Unit Hom"], r["Vlr Total Hom"], r["Data Pub"], r["CNPJ"], r["Ano"], r["Sequencial"], r["ModalidadeNome"], r["ObjetoContrato"]))
-                                self.after(0, lambda: self.tree.yview_moveto(1))
+                            chave_u = f"{cnpj}_{ano}_{seq}_{num_item}"
+                            if chave_u not in chaves_cadastradas:
+                                chaves_cadastradas.add(chave_u)
+                                qtd, v_u_est, v_t_est, v_u_hom, v_t_hom = float(it.get("quantidade", 1)), it.get("valorUnitarioEstimado"), it.get("valorTotalEstimado"), it.get("valorUnitarioHomologado"), it.get("valorTotalHomologado") or it.get("valorTotal")
+                                reg = {"Orgao": orgao, "UF": uf, "ObjetoContrato": objeto_contrato, "DescItem": desc_item, "Qtd": qtd, "Vlr Unit Est": self.formatar_moeda(v_u_est), "Vlr Total Est": self.formatar_moeda(v_t_est), "Vlr Unit Hom": self.formatar_moeda(v_u_hom), "Vlr Total Hom": self.formatar_moeda(v_t_hom), "Data Pub": data_pub, "CNPJ": cnpj, "Ano": ano, "Sequencial": seq, "NumeroItem": num_item, "ModalidadeID": str(cod_modalidade), "ModalidadeNome": mod_nome, "PortalNome": portal_nome}
                                 
-                            self.salvar_item_db(reg)
-                            itens_salvos_count += 1
-                            
-                            if tipo_operacao == "carga" and itens_salvos_count % 50 == 0:
-                                self.registrar_log(f"🔄 Atualização em massa: {itens_salvos_count} itens processados e guardados...")
-                    
-                    if (itens_json.get("paginasRestantes", 0) if isinstance(itens_json, dict) else 0) <= 0: break
-                    pag_item += 1
+                                if tipo_operacao == "busca" or (tipo_operacao == "carga" and self.mostrar_carga_no_grid):
+                                    self.resultados_pncp.append(reg)
+                                    self.after(0, lambda r=reg: self._adicionar_item_tabela(r["Orgao"], r["UF"], r["PortalNome"], f"{r['Sequencial']}/{r['Ano']}", r["DescItem"], r["Qtd"], r["Vlr Unit Est"], r["Vlr Total Est"], r["Vlr Unit Hom"], r["Vlr Total Hom"], r["Data Pub"], r["CNPJ"], r["Ano"], r["Sequencial"], r["ModalidadeNome"], r["ObjetoContrato"]))
+                                    self.after(0, lambda: self.tree.yview_moveto(1))
+                                    
+                                self.salvar_item_db(reg)
+                                itens_salvos_count += 1
+                                
+                                if tipo_operacao == "carga" and itens_salvos_count % 50 == 0:
+                                    self.registrar_log(f"🔄 Atualização em massa: {itens_salvos_count} itens processados e guardados...")
+                        
+                        if (itens_json.get("paginasRestantes", 0) if isinstance(itens_json, dict) else 0) <= 0: break
+                        pag_item += 1
+                    except Exception as err_itens:
+                        self.registrar_log(f"⚠️ Aviso: Falha ao baixar itens do edital {seq}/{ano} (CNPJ: {cnpj}). Saltando para o próximo...")
+                        break # Aborta as páginas deste edital com erro, mas prossegue para o próximo contrato (Anti-Crash)
         return itens_salvos_count
 
     def _limpar_tabela(self):
