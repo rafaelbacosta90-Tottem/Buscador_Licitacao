@@ -5,3 +5,4 @@ Versoes
 8.0 - Validador de CNPJ para licença
 8.1 - Melhoria na validação de licença
 8.2 - Melhoria no Atualização em massa
+8.3 - Melhoria no log e tela
