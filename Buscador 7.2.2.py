@@ -10,6 +10,55 @@ import urllib.parse
 import webbrowser
 import customtkinter as ctk
 import requests
+import uuid
+import sys
+from tkinter import messagebox
+
+
+#Validador
+def obter_hwid() -> str:
+    """Gera um identificador único baseado no endereço MAC/Hardware do computador."""
+    return str(uuid.getnode())
+
+def validar_licenca_online(chave_licenca: str) -> bool:
+    """Envia a chave e o HWID para a API Serverless na Vercel."""
+    url_api = "https://buscadorlicitacao.vercel.app" # Substitua pela sua URL da Vercel
+    hwid = obter_hwid()
+    
+    payload = {
+        "chave": chave_licenca,
+        "hwid": hwid
+    }
+    
+    try:
+        response = requests.post(url_api, json=payload, timeout=10)
+        dados = response.json()
+        
+        if response.status_code == 200 and dados.get("status") == "success":
+            return True
+        else:
+            mensagem_erro = dados.get("message", "Acesso negado.")
+            messagebox.showerror("Licença Inválida", f"Falha na validação do sistema:\n{mensagem_erro}")
+            return False
+            
+    except Exception as e:
+        messagebox.showerror("Erro de Conexão", f"Não foi possível validar a licença online.\nVerifique sua internet.\nDetalhe: {e}")
+        return False
+
+
+# Exemplo de integração no arranque do seu script Tkinter/CustomTkinter:
+if __name__ == "__main__":
+    # Suponha que você salva a chave num arquivo local (ex: licenca.txt) ou pede via tela de Login
+    CHAVE_USUARIO = "MINHA-CHAVE-TESTE-123"
+    
+    if validar_licenca_online(CHAVE_USUARIO):
+        app = BuscadorPNCP()
+        app.mainloop()
+    else:
+        sys.exit() # Encerra o programa se a licença for inválida
+
+
+########################FIM VALIDADOR
 
 # Configuração visual do CustomTkinter
 ctk.set_appearance_mode("Light")
