@@ -6,6 +6,7 @@ Versoes
 8.1 - Melhoria na validação de licença
 8.2 - Melhoria no Atualização em massa
 8.3 - Melhoria no log e tela
+8.3.2 - Melhoria na licenca
 
 
 
