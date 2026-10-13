@@ -13,12 +13,14 @@ import uuid
 import traceback
 import customtkinter as ctk
 import requests
+from cryptography.fernet import Fernet
 
 # Configuração visual do CustomTkinter
 ctk.set_appearance_mode("Light")
 ctk.set_default_color_theme("blue")
 
-versao = "8.3.1"
+versao = "8.3.2"
+
 
 def normalizar_texto(texto: str) -> str:
     if not texto: return ""
@@ -50,9 +52,15 @@ class BuscadorPNCP(ctk.CTk):
         self.geometry("1180x920")
 
         # ------------------------------------------------------------------
-        # COLOQUE AQUI A SUA URL DA VERCEL (com o /api/valida no final)
+        # 1. COLOQUE AQUI A SUA URL DA VERCEL (com o /api/valida no final)
         # ------------------------------------------------------------------
         self.url_api_licenca = "https://meu-validador-licencas.vercel.app/api/valida"
+
+        # ------------------------------------------------------------------
+        # 2. CHAVE DE CRIPTOGRAFIA (Já gerada e pronta a usar!)
+        # ------------------------------------------------------------------
+        self.chave_cripto = b'kM7hQ7uX1x4qW8zF3rN9mT2vP5yC8aD4gG6jH9kL1sM=' 
+        self.fernet = Fernet(self.chave_cripto)
 
         self.db_path = "licitacoes_pncp_v9.db"
 
@@ -69,6 +77,9 @@ class BuscadorPNCP(ctk.CTk):
 
         self.after(200, self._rotina_de_arranque)
 
+    # ==================================================================
+    # SISTEMA DE SEGURANÇA E CRIPTOGRAFIA
+    # ==================================================================
     def _rotina_de_arranque(self):
         self.setup_db_licenca()
         cnpj_salvo = self.get_cnpj_registrado()
@@ -76,7 +87,8 @@ class BuscadorPNCP(ctk.CTk):
         if not cnpj_salvo:
             self.solicitar_registro_cnpj()
         else:
-            if self.validar_licenca_online(cnpj_salvo, silencioso=True):
+            sucesso, _ = self.validar_licenca_online(cnpj_salvo, silencioso=True)
+            if sucesso:
                 self.iniciar_sistema_principal()
             else:
                 self.solicitar_registro_cnpj()
@@ -84,10 +96,10 @@ class BuscadorPNCP(ctk.CTk):
     def obter_hwid(self) -> str:
         return str(uuid.getnode())
 
-    def validar_licenca_online(self, cnpj_licenca: str, silencioso=False) -> bool:
+    def validar_licenca_online(self, cnpj_licenca: str, silencioso=False):
         if not self.url_api_licenca or "SUA-URL-AQUI" in self.url_api_licenca:
             if not silencioso: messagebox.showerror("Erro de Configuração", "A URL da API da Vercel não foi configurada.")
-            return False
+            return False, None
 
         payload = {"cnpj": cnpj_licenca, "hwid": self.obter_hwid()}
         try:
@@ -95,31 +107,49 @@ class BuscadorPNCP(ctk.CTk):
             try: dados = response.json()
             except:
                 if not silencioso: messagebox.showerror("Erro de Servidor", "A API da Vercel falhou. Verifique a URL.")
-                return False
+                return False, None
                 
-            if response.status_code == 200 and dados.get("status") == "success": return True
+            if response.status_code == 200 and dados.get("status") == "success": 
+                # Retorna True e a Data de Validade da Vercel
+                return True, dados.get("data_validade", "2099-12-31")
             else:
                 if not silencioso: messagebox.showerror("Licença Inválida", f"Falha na validação:\n{dados.get('message', 'Negado')}")
-                return False
+                return False, None
         except requests.exceptions.RequestException as e:
             if not silencioso: messagebox.showerror("Erro de Conexão", f"Falha de internet:\n{e}")
-            return False
+            return False, None
 
     def setup_db_licenca(self):
         try:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
-                cursor.execute("CREATE TABLE IF NOT EXISTS usuario_licenca (id INTEGER PRIMARY KEY AUTOINCREMENT, cnpj TEXT NOT NULL, data_registro TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
+                cursor.execute("CREATE TABLE IF NOT EXISTS usuario_licenca (id INTEGER PRIMARY KEY AUTOINCREMENT, token TEXT NOT NULL)")
                 conn.commit()
         except Exception:
             sys.exit()
 
     def get_cnpj_registrado(self):
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT cnpj FROM usuario_licenca ORDER BY id DESC LIMIT 1")
-            row = cursor.fetchone()
-            return row[0] if row else None
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT token FROM usuario_licenca ORDER BY id DESC LIMIT 1")
+                row = cursor.fetchone()
+                
+                if not row: return None
+                
+                token_criptografado = row[0]
+                texto_desencriptado = self.fernet.decrypt(token_criptografado.encode()).decode()
+                cnpj_salvo, data_validade = texto_desencriptado.split('|')
+                
+                # Bloqueio offline se a data já tiver passado
+                hoje = datetime.datetime.now().strftime("%Y-%m-%d")
+                if hoje > data_validade[:10]:
+                    return None
+                    
+                return cnpj_salvo
+        except Exception:
+            # Se alguém tentar mexer no banco de dados, o decrypt falha e cai aqui (Fraude detetada)
+            return None
 
     def solicitar_registro_cnpj(self):
         self.janela_login = ctk.CTkToplevel(self)
@@ -145,24 +175,36 @@ class BuscadorPNCP(ctk.CTk):
         self.btn_ativar.configure(text="A validar...", state="disabled")
         self.janela_login.update()
         
-        if self.validar_licenca_online(cnpj, silencioso=False):
-            with sqlite3.connect(self.db_path) as conn:
-                cursor = conn.cursor()
-                cursor.execute("DELETE FROM usuario_licenca")
-                cursor.execute("INSERT INTO usuario_licenca (cnpj) VALUES (?)", (cnpj,))
-                conn.commit()
-            messagebox.showinfo("Sucesso", "Licença ativada com sucesso!")
-            self.janela_login.destroy()
-            self.iniciar_sistema_principal()
+        sucesso, data_validade = self.validar_licenca_online(cnpj, silencioso=False)
+        
+        if sucesso:
+            try:
+                # Encripta a junção do CNPJ com a Data e guarda no Banco
+                dados_licenca = f"{cnpj}|{data_validade}"
+                token_seguro = self.fernet.encrypt(dados_licenca.encode()).decode()
+
+                with sqlite3.connect(self.db_path) as conn:
+                    cursor = conn.cursor()
+                    cursor.execute("DELETE FROM usuario_licenca")
+                    cursor.execute("INSERT INTO usuario_licenca (token) VALUES (?)", (token_seguro,))
+                    conn.commit()
+                
+                messagebox.showinfo("Sucesso", "Licença ativada com sucesso!")
+                self.janela_login.destroy()
+                self.iniciar_sistema_principal()
+            except Exception as e:
+                messagebox.showerror("Erro de Criptografia", f"Falha ao gerar token de segurança: {e}")
+                self.btn_ativar.configure(text="Validar Online", state="normal")
         else:
             self.btn_ativar.configure(text="Validar Online", state="normal")
 
+    # ==================================================================
+    # SISTEMA PRINCIPAL
+    # ==================================================================
     def iniciar_sistema_principal(self):
         self.deiconify() 
-        try:
-            self.state('zoomed')
-        except:
-            self.attributes('-zoomed', True)
+        try: self.state('zoomed')
+        except: self.attributes('-zoomed', True)
 
         self.config_precos = {"vlr_unit_est": tk.BooleanVar(value=True), "vlr_total_est": tk.BooleanVar(value=True), "vlr_unit_hom": tk.BooleanVar(value=True), "vlr_total_hom": tk.BooleanVar(value=True)}
         self.lista_portais_comuns = ["Compras.gov.br", "Portal de Compras Públicas", "BLL", "Licitações-e", "BEC", "Licitar Digital", "AZ Informática", "BBMNET", "BNC", "Portal de Compras da Caixa", "Licitanet", "Abase Sistemas", "Compras RS", "Compras SC", "Compras GO", "Ammfoco", "TCE", "Prefeitura"]
@@ -178,9 +220,6 @@ class BuscadorPNCP(ctk.CTk):
         self.criar_menu_superior()
         self.criar_interface()
 
-    # -------------------------------------------------------------
-    # BARRA DE MENUS SUPERIOR
-    # -------------------------------------------------------------
     def criar_menu_superior(self):
         self.menubar = tk.Menu(self)
 
@@ -208,9 +247,6 @@ class BuscadorPNCP(ctk.CTk):
             self.menu_sync.entryconfig("Parar Atualização", state="disabled")
             self.chk_base_local.configure(state="normal")
 
-    # -------------------------------------------------------------
-    # JANELA DE ATUALIZAÇÃO (CARGA)
-    # -------------------------------------------------------------
     def abrir_janela_carga(self):
         janela = ctk.CTkToplevel(self)
         janela.title("Atualização - Sincronizar Base Local")
@@ -278,7 +314,6 @@ class BuscadorPNCP(ctk.CTk):
             uf = combo_uf.get()
             cat_id = self.categorias_map.get(combo_cat.get())
             mod_id = self.modalidades_map.get(combo_mod.get())
-            
             p_sel = [] if vars_portais_carga["Todos"].get() else [p for p in self.lista_portais_comuns if vars_portais_carga[p].get()]
                 
             self.cancelar_carga = False
@@ -298,9 +333,6 @@ class BuscadorPNCP(ctk.CTk):
         self.registrar_log("⚠️ Atualização cancelada pelo usuário.")
         self.lbl_status.configure(text="A interromper processo...", text_color="#e74c3c")
 
-    # -------------------------------------------------------------
-    # MÉTODOS DE BANCO DE DADOS
-    # -------------------------------------------------------------
     def init_db(self):
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
@@ -323,9 +355,6 @@ class BuscadorPNCP(ctk.CTk):
                 return conn.cursor().execute("SELECT COUNT(*) FROM editais_itens").fetchone()[0]
         except: return 0
 
-    # -------------------------------------------------------------
-    # CONSTRUÇÃO DA INTERFACE PRINCIPAL
-    # -------------------------------------------------------------
     def criar_interface(self):
         style = ttk.Style()
         style.theme_use("default")
@@ -480,9 +509,6 @@ class BuscadorPNCP(ctk.CTk):
         self.txt_logs = ctk.CTkTextbox(self.tab_logs, font=("Consolas", 11))
         self.txt_logs.pack(fill="both", expand=True, padx=10, pady=10)
 
-    # -------------------------------------------------------------
-    # EVENTOS DA INTERFACE
-    # -------------------------------------------------------------
     def aplicar_colunas_grid(self):
         colunas_visiveis = ["orgao", "uf", "portal", "edital", "objeto", "qtd"]
         if self.config_precos["vlr_unit_est"].get(): colunas_visiveis.append("vlr_unit_est")
@@ -632,8 +658,7 @@ class BuscadorPNCP(ctk.CTk):
     def _get_com_retentativa(self, url, params, max_tentativas=3, timeout=15, tipo_operacao="busca"):
         for tentativa in range(1, max_tentativas + 1):
             if (self.cancelar_busca if tipo_operacao == "busca" else self.cancelar_carga): return None
-            try: 
-                return self.http_session.get(url, params=params, timeout=timeout)
+            try: return self.http_session.get(url, params=params, timeout=timeout)
             except Exception as e:
                 if tentativa == max_tentativas or (self.cancelar_busca if tipo_operacao == "busca" else self.cancelar_carga): 
                     raise e
@@ -642,9 +667,6 @@ class BuscadorPNCP(ctk.CTk):
                     if (self.cancelar_busca if tipo_operacao == "busca" else self.cancelar_carga): return None
                     time.sleep(0.1)
 
-    # -------------------------------------------------------------
-    # MOTORES CENTRAIS (BACKGROUND UPDATE E BUSCA MANUAL)
-    # -------------------------------------------------------------
     def _executar_carga_base_thread(self, data_inicio, data_fim, categoria_id, modalidade_id, uf_selecionada, portais_selecionados):
         if self.mostrar_carga_no_grid:
             self.after(0, self._limpar_tabela)
@@ -784,7 +806,6 @@ class BuscadorPNCP(ctk.CTk):
                     if (self.cancelar_busca if tipo_operacao == "busca" else self.cancelar_carga): break
                     try:
                         time.sleep(0.05) 
-                        # Aumentado o timeout de 10 para 25 segundos para suportar editais gigantes
                         res_i = self._get_com_retentativa(f"https://pncp.gov.br/api/pncp/v1/orgaos/{cnpj}/compras/{ano}/{seq}/itens", {"pagina": pag_item, "tamanhoPagina": 500}, timeout=25, tipo_operacao=tipo_operacao)
                         if not res_i or res_i.status_code != 200: break
                         
@@ -813,13 +834,13 @@ class BuscadorPNCP(ctk.CTk):
                                 itens_salvos_count += 1
                                 
                                 if tipo_operacao == "carga" and itens_salvos_count % 50 == 0:
-                                    self.registrar_log(f"🔄 Atualização em massa: {itens_salvos_count} itens processados e guardados...")
+                                    self.registrar_log(f"🔄 Carga Background: {itens_salvos_count} itens processados e guardados na Base Local...")
                         
                         if (itens_json.get("paginasRestantes", 0) if isinstance(itens_json, dict) else 0) <= 0: break
                         pag_item += 1
-                    except Exception as err_itens:
-                        self.registrar_log(f"⚠️ Aviso: Falha ao baixar itens do edital {seq}/{ano} (CNPJ: {cnpj}). Saltando para o próximo...")
-                        break # Aborta as páginas deste edital com erro, mas prossegue para o próximo contrato (Anti-Crash)
+                    except Exception:
+                        self.registrar_log(f"⚠️ Aviso: Falha ao baixar itens do edital {seq}/{ano}. Saltando...")
+                        break
         return itens_salvos_count
 
     def _limpar_tabela(self):
