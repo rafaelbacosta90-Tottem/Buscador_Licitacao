@@ -13,14 +13,15 @@ import uuid
 import traceback
 import customtkinter as ctk
 import requests
-from cryptography.fernet import Fernet
+import hmac
+import hashlib
+import base64
 
 # Configuração visual do CustomTkinter
 ctk.set_appearance_mode("Light")
 ctk.set_default_color_theme("blue")
 
-versao = "8.3.2"
-
+versao= "8.3.4"
 
 def normalizar_texto(texto: str) -> str:
     if not texto: return ""
@@ -42,26 +43,21 @@ def contem_palavras_chave(texto: str, radicais: list) -> bool:
     if not radicais: return False
     return all(rad in normalizar_texto(texto) for rad in radicais)
 
-
 class BuscadorPNCP(ctk.CTk):
-
     def __init__(self):
         super().__init__()
 
         self.title("Buscador Multi-Portal de Licitações & Preços - Compras Públicas")
         self.geometry("1180x920")
+        
+        # Opcional: Se quiser que a logomarca apareça também na janela, descomente a linha abaixo e certifique-se de que o icone.ico está na mesma pasta.
+        # self.iconbitmap("icone.ico")
 
         # ------------------------------------------------------------------
-        # 1. COLOQUE AQUI A SUA URL DA VERCEL (com o /api/valida no final)
+        # CONFIGURAÇÕES DE SEGURANÇA E API
         # ------------------------------------------------------------------
         self.url_api_licenca = "https://meu-validador-licencas.vercel.app/api/valida"
-
-        # ------------------------------------------------------------------
-        # 2. CHAVE DE CRIPTOGRAFIA (Já gerada e pronta a usar!)
-        # ------------------------------------------------------------------
-        self.chave_cripto = b'kM7hQ7uX1x4qW8zF3rN9mT2vP5yC8aD4gG6jH9kL1sM=' 
-        self.fernet = Fernet(self.chave_cripto)
-
+        self.chave_seguranca = b'kM7hQ7uX1x4qW8zF3rN9mT2vP5yC8aD4gG6jH9kL1sM=' 
         self.db_path = "licitacoes_pncp_v9.db"
 
         self.withdraw()
@@ -78,7 +74,7 @@ class BuscadorPNCP(ctk.CTk):
         self.after(200, self._rotina_de_arranque)
 
     # ==================================================================
-    # SISTEMA DE SEGURANÇA E CRIPTOGRAFIA
+    # SISTEMA DE SEGURANÇA (NATIVO E À PROVA DE ADULTERAÇÃO)
     # ==================================================================
     def _rotina_de_arranque(self):
         self.setup_db_licenca()
@@ -110,7 +106,6 @@ class BuscadorPNCP(ctk.CTk):
                 return False, None
                 
             if response.status_code == 200 and dados.get("status") == "success": 
-                # Retorna True e a Data de Validade da Vercel
                 return True, dados.get("data_validade", "2099-12-31")
             else:
                 if not silencioso: messagebox.showerror("Licença Inválida", f"Falha na validação:\n{dados.get('message', 'Negado')}")
@@ -138,18 +133,22 @@ class BuscadorPNCP(ctk.CTk):
                 if not row: return None
                 
                 token_criptografado = row[0]
-                texto_desencriptado = self.fernet.decrypt(token_criptografado.encode()).decode()
-                cnpj_salvo, data_validade = texto_desencriptado.split('|')
+                token_bruto = base64.b64decode(token_criptografado.encode()).decode()
+                cnpj_salvo, data_validade, assinatura_salva = token_bruto.split('|')
                 
-                # Bloqueio offline se a data já tiver passado
+                dados_licenca = f"{cnpj_salvo}|{data_validade}"
+                assinatura_calculada = hmac.new(self.chave_seguranca, dados_licenca.encode(), hashlib.sha256).hexdigest()
+                
+                if assinatura_calculada != assinatura_salva:
+                    return None
+                
                 hoje = datetime.datetime.now().strftime("%Y-%m-%d")
                 if hoje > data_validade[:10]:
                     return None
                     
                 return cnpj_salvo
         except Exception:
-            # Se alguém tentar mexer no banco de dados, o decrypt falha e cai aqui (Fraude detetada)
-            return None
+            return None 
 
     def solicitar_registro_cnpj(self):
         self.janela_login = ctk.CTkToplevel(self)
@@ -179,11 +178,13 @@ class BuscadorPNCP(ctk.CTk):
         
         if sucesso:
             try:
-                # Encripta a junção do CNPJ com a Data e guarda no Banco
                 dados_licenca = f"{cnpj}|{data_validade}"
-                token_seguro = self.fernet.encrypt(dados_licenca.encode()).decode()
+                assinatura = hmac.new(self.chave_seguranca, dados_licenca.encode(), hashlib.sha256).hexdigest()
+                
+                token_bruto = f"{dados_licenca}|{assinatura}"
+                token_seguro = base64.b64encode(token_bruto.encode()).decode()
 
-                with sqlite3.connect(self.db_path) as conn:
+                with sqlite3.connect(self.db_path, timeout=10) as conn:
                     cursor = conn.cursor()
                     cursor.execute("DELETE FROM usuario_licenca")
                     cursor.execute("INSERT INTO usuario_licenca (token) VALUES (?)", (token_seguro,))
@@ -193,13 +194,13 @@ class BuscadorPNCP(ctk.CTk):
                 self.janela_login.destroy()
                 self.iniciar_sistema_principal()
             except Exception as e:
-                messagebox.showerror("Erro de Criptografia", f"Falha ao gerar token de segurança: {e}")
+                messagebox.showerror("Erro de Segurança", f"Falha ao gerar token: {e}")
                 self.btn_ativar.configure(text="Validar Online", state="normal")
         else:
             self.btn_ativar.configure(text="Validar Online", state="normal")
 
     # ==================================================================
-    # SISTEMA PRINCIPAL
+    # SISTEMA PRINCIPAL E UI
     # ==================================================================
     def iniciar_sistema_principal(self):
         self.deiconify() 
@@ -341,7 +342,7 @@ class BuscadorPNCP(ctk.CTk):
 
     def salvar_item_db(self, item_dict):
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with sqlite3.connect(self.db_path, timeout=10) as conn:
                 cursor = conn.cursor()
                 cursor.execute("INSERT OR REPLACE INTO editais_itens (orgao, uf, objeto_contrato, desc_item, quantidade, vlr_unit_est, vlr_total_est, vlr_unit_hom, vlr_total_hom, data_publicacao, cnpj, ano, sequencial, numero_item, modalidade_id, modalidade_nome, portal_nome) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (
                     item_dict.get("Orgao"), item_dict.get("UF"), item_dict.get("ObjetoContrato"), item_dict.get("DescItem"), item_dict.get("Qtd"), item_dict.get("Vlr Unit Est"), item_dict.get("Vlr Total Est"), item_dict.get("Vlr Unit Hom"), item_dict.get("Vlr Total Hom"), item_dict.get("Data Pub"), item_dict.get("CNPJ", ""), item_dict.get("Ano", 0), item_dict.get("Sequencial", 0), item_dict.get("NumeroItem", 0), item_dict.get("ModalidadeID", ""), item_dict.get("ModalidadeNome", ""), item_dict.get("PortalNome", "")
@@ -370,7 +371,6 @@ class BuscadorPNCP(ctk.CTk):
         self.frame_busca = ctk.CTkFrame(self.tab_pesquisa, fg_color="transparent")
         self.frame_busca.pack(fill="x", padx=10, pady=5)
 
-        # --- LINHA 0 ---
         self.lbl_termo = ctk.CTkLabel(self.frame_busca, text="Produto/Serviço (Termo de busca):", font=("Arial", 12, "bold"))
         self.lbl_termo.grid(row=0, column=0, sticky="w", padx=5, pady=5)
 
@@ -390,7 +390,6 @@ class BuscadorPNCP(ctk.CTk):
         self.default_btn_buscar_fg = self.btn_buscar.cget("fg_color")
         self.default_btn_buscar_hover = self.btn_buscar.cget("hover_color")
 
-        # --- LINHA 1 ---
         data_atual = datetime.datetime.now()
         data_ini_padrao = (data_atual - datetime.timedelta(days=7)).strftime("%d/%m/%Y")
         data_fim_padrao = data_atual.strftime("%d/%m/%Y")
@@ -413,7 +412,6 @@ class BuscadorPNCP(ctk.CTk):
         self.combo_status.set("Todos")
         self.combo_status.grid(row=1, column=5, sticky="w", padx=5, pady=5)
 
-        # --- LINHA 2 ---
         self.lbl_portal = ctk.CTkLabel(self.frame_busca, text="Portais de Compra:")
         self.lbl_portal.grid(row=2, column=0, sticky="w", padx=5, pady=5)
         self.btn_portal = ctk.CTkButton(self.frame_busca, text="Selecionar", width=120, fg_color="#3498db", hover_color="#2980b9", command=self.abrir_menu_portais)
@@ -431,7 +429,6 @@ class BuscadorPNCP(ctk.CTk):
         self.combo_modalidade.set("Principais (Pregão, Dispensa, Conc.)")
         self.combo_modalidade.grid(row=2, column=5, sticky="w", padx=5, pady=5)
 
-        # --- LINHA 3 ---
         self.lbl_uf = ctk.CTkLabel(self.frame_busca, text="Estado (UF) do Órgão:")
         self.lbl_uf.grid(row=3, column=0, sticky="w", padx=5, pady=5)
         self.combo_uf = ctk.CTkOptionMenu(self.frame_busca, values=self.lista_ufs, width=80)
@@ -441,7 +438,6 @@ class BuscadorPNCP(ctk.CTk):
         self.chk_base_local = ctk.CTkCheckBox(self.frame_busca, text="💾 Buscar apenas na Base Local (Obrigatório durante a Sincronização)", font=("Arial", 11, "bold"))
         self.chk_base_local.grid(row=3, column=2, columnspan=3, sticky="w", padx=5, pady=5)
 
-        # --- CABEÇALHO TABELA ---
         self.frame_head_tabela = ctk.CTkFrame(self.tab_pesquisa, fg_color="transparent")
         self.frame_head_tabela.pack(fill="x", padx=10, pady=(15, 2))
         self.lbl_titulo_tabela = ctk.CTkLabel(self.frame_head_tabela, text="Resultados da Pesquisa / Sincronização (Duplo clique para abrir edital):", font=("Arial", 12, "bold"))
