@@ -16,6 +16,7 @@ import requests
 import hmac
 import hashlib
 import base64
+import platform
 
 # Configuração visual do CustomTkinter
 ctk.set_appearance_mode("Light")
@@ -91,8 +92,8 @@ class BuscadorPNCP(ctk.CTk):
 
     def obter_hwid(self) -> str:
         return str(uuid.getnode())
-
-    def validar_licenca_online(self, cnpj_licenca: str, silencioso=False):
+     ### Funcao antiga de validar licenca
+  ###  def validar_licenca_online(self, cnpj_licenca: str, silencioso=False):
         if not self.url_api_licenca or "SUA-URL-AQUI" in self.url_api_licenca:
             if not silencioso: messagebox.showerror("Erro de Configuração", "A URL da API da Vercel não foi configurada.")
             return False, None
@@ -113,6 +114,43 @@ class BuscadorPNCP(ctk.CTk):
         except requests.exceptions.RequestException as e:
             if not silencioso: messagebox.showerror("Erro de Conexão", f"Falha de internet:\n{e}")
             return False, None
+    
+    ####Funcao nova de validar licenca
+    def validar_licenca_online(self, cnpj_licenca: str, silencioso=False):
+        if not self.url_api_licenca or "SUA-URL-AQUI" in self.url_api_licenca:
+            if not silencioso: messagebox.showerror("Erro de Configuração", "A URL da API da Vercel não foi configurada.")
+            return False, None
+
+        # Captura o Nome do PC e a Data/Hora local
+        nome_maquina = platform.node()
+        data_hora = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        # Payload enriquecido com os novos dados de auditoria
+        payload = {
+            "cnpj": cnpj_licenca, 
+            "hwid": self.obter_hwid(),
+            "maquina": nome_maquina,
+            "data_acesso": data_hora
+        }
+        
+        try:
+            response = requests.post(self.url_api_licenca, json=payload, timeout=10)
+            try: 
+                dados = response.json()
+            except:
+                if not silencioso: messagebox.showerror("Erro de Servidor", "A API da Vercel falhou. Verifique a URL.")
+                return False, None
+                
+            if response.status_code == 200 and dados.get("status") == "success": 
+                return True, dados.get("data_validade", "2099-12-31")
+            else:
+                if not silencioso: messagebox.showerror("Licença Inválida", f"Falha na validação:\n{dados.get('message', 'Negado')}")
+                return False, None
+        except requests.exceptions.RequestException as e:
+            if not silencioso: messagebox.showerror("Erro de Conexão", f"Falha de internet:\n{e}")
+            return False, None
+        
+    ####FIM  Funcao nova de validar licenca
 
     def setup_db_licenca(self):
         try:
