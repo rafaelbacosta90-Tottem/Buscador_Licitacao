@@ -6,23 +6,22 @@ import time
 import tkinter as tk
 from tkinter import messagebox, ttk, filedialog
 import unicodedata
-import urllib.parse
 import webbrowser
 import sys
+import os
+import subprocess
 import uuid
 import traceback
+import platform
 import customtkinter as ctk
 import requests
 import hmac
 import hashlib
 import base64
-import platform
 
 # Configuração visual do CustomTkinter
 ctk.set_appearance_mode("Light")
 ctk.set_default_color_theme("blue")
-
-versao= "8.3.4"
 
 def normalizar_texto(texto: str) -> str:
     if not texto: return ""
@@ -44,6 +43,7 @@ def contem_palavras_chave(texto: str, radicais: list) -> bool:
     if not radicais: return False
     return all(rad in normalizar_texto(texto) for rad in radicais)
 
+
 class BuscadorPNCP(ctk.CTk):
     def __init__(self):
         super().__init__()
@@ -51,13 +51,18 @@ class BuscadorPNCP(ctk.CTk):
         self.title("Buscador Multi-Portal de Licitações & Preços - Compras Públicas")
         self.geometry("1180x920")
         
-        # Opcional: Se quiser que a logomarca apareça também na janela, descomente a linha abaixo e certifique-se de que o icone.ico está na mesma pasta.
+        # Opcional: Se quiser que a logomarca apareça também na janela
         # self.iconbitmap("icone.ico")
 
         # ------------------------------------------------------------------
-        # CONFIGURAÇÕES DE SEGURANÇA E API
+        # CONFIGURAÇÕES DE VERSÃO E SEGURANÇA
         # ------------------------------------------------------------------
+        self.versao_local = "8.4"
+        
+        # INSIRA AQUI AS SUAS URLs DA VERCEL
+        self.url_api_versao = "https://meu-validador-licencas.vercel.app/api/versao"
         self.url_api_licenca = "https://meu-validador-licencas.vercel.app/api/valida"
+        
         self.chave_seguranca = b'kM7hQ7uX1x4qW8zF3rN9mT2vP5yC8aD4gG6jH9kL1sM=' 
         self.db_path = "licitacoes_pncp_v9.db"
 
@@ -75,12 +80,18 @@ class BuscadorPNCP(ctk.CTk):
         self.after(200, self._rotina_de_arranque)
 
     # ==================================================================
-    # SISTEMA DE SEGURANÇA (NATIVO E À PROVA DE ADULTERAÇÃO)
+    # SISTEMA DE INICIALIZAÇÃO, ATUALIZAÇÃO E LICENÇA
     # ==================================================================
     def _rotina_de_arranque(self):
+        # 1. Verifica se há versão nova/obrigatória antes de tudo
+        if not self.verificar_versao_inicial():
+            return # Bloqueia o início para atualizar
+
+        # 2. Configura a base de dados de licença
         self.setup_db_licenca()
         cnpj_salvo = self.get_cnpj_registrado()
 
+        # 3. Valida a licença
         if not cnpj_salvo:
             self.solicitar_registro_cnpj()
         else:
@@ -90,15 +101,96 @@ class BuscadorPNCP(ctk.CTk):
             else:
                 self.solicitar_registro_cnpj()
 
+    def verificar_versao_inicial(self):
+        """Verifica atualizações. Retorna True se puder iniciar, False se for bloqueado."""
+        try:
+            res = requests.get(self.url_api_versao, timeout=5)
+            if res.status_code != 200: 
+                return True 
+
+            dados = res.json()
+            versao_nuvem = dados.get("versao_atual", self.versao_local)
+            versao_minima = dados.get("versao_minima_obrigatoria", "0.0")
+            link_download = dados.get("url_download")
+
+            v_local = float(self.versao_local)
+            v_nuvem = float(versao_nuvem)
+            v_minima = float(versao_minima)
+
+            # REGRA OBRIGATÓRIA
+            if v_local < v_minima:
+                messagebox.showerror("Atualização Obrigatória", f"A sua versão ({v_local}) foi descontinuada.\nO sistema será atualizado agora para a versão {v_nuvem}.")
+                self.executar_download_e_atualizacao(link_download)
+                return False 
+                
+            # REGRA OPCIONAL
+            elif v_local < v_nuvem:
+                resposta = messagebox.askyesno("Atualização Disponível", f"Nova versão {v_nuvem} encontrada!\n\nDeseja atualizar o sistema agora? (Recomendado)")
+                if resposta:
+                    self.executar_download_e_atualizacao(link_download)
+                    return False
+                    
+            return True
+        except Exception:
+            return True 
+
+    def executar_download_e_atualizacao(self, link_download):
+        """Baixa o novo .exe e cria o script de auto-substituição."""
+        try:
+            janela_aviso = ctk.CTkToplevel(self)
+            janela_aviso.title("A Atualizar")
+            janela_aviso.geometry("300x100")
+            janela_aviso.attributes('-topmost', True)
+            ctk.CTkLabel(janela_aviso, text="A transferir a nova versão...\nPor favor, aguarde.", font=("Arial", 14, "bold")).pack(expand=True)
+            self.update()
+
+            caminho_exe_atual = os.path.abspath(sys.argv[0]) 
+            pasta_atual = os.path.dirname(caminho_exe_atual)
+            nome_exe_original = os.path.basename(caminho_exe_atual)
+            
+            caminho_novo_exe = os.path.join(pasta_atual, "atualizacao_temp.exe")
+            caminho_script_bat = os.path.join(pasta_atual, "atualizador.bat")
+
+            resposta_download = requests.get(link_download, stream=True)
+            with open(caminho_novo_exe, 'wb') as f:
+                for chunk in resposta_download.iter_content(chunk_size=8192):
+                    f.write(chunk)
+
+            conteudo_bat = f"""@echo off
+timeout /t 2 /nobreak > NUL
+del "{caminho_exe_atual}"
+ren "{caminho_novo_exe}" "{nome_exe_original}"
+start "" "{caminho_exe_atual}"
+del "%~f0"
+"""
+            with open(caminho_script_bat, "w", encoding="utf-8") as bat_file:
+                bat_file.write(conteudo_bat)
+
+            subprocess.Popen(caminho_script_bat, shell=True, creationflags=subprocess.CREATE_NO_WINDOW)
+            sys.exit()
+        except Exception as e:
+            messagebox.showerror("Erro na Atualização", f"Falha ao transferir a atualização: {e}\n\nFaça o download manualmente.")
+            sys.exit()
+
     def obter_hwid(self) -> str:
         return str(uuid.getnode())
-     ### Funcao antiga de validar licenca
-  ###  def validar_licenca_online(self, cnpj_licenca: str, silencioso=False):
+
+    def validar_licenca_online(self, cnpj_licenca: str, silencioso=False):
         if not self.url_api_licenca or "SUA-URL-AQUI" in self.url_api_licenca:
             if not silencioso: messagebox.showerror("Erro de Configuração", "A URL da API da Vercel não foi configurada.")
             return False, None
 
-        payload = {"cnpj": cnpj_licenca, "hwid": self.obter_hwid()}
+        nome_maquina = platform.node()
+        data_hora = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        payload = {
+            "cnpj": cnpj_licenca, 
+            "hwid": self.obter_hwid(),
+            "maquina": nome_maquina,
+            "data_acesso": data_hora,
+            "versao_atual": self.versao_local
+        }
+        
         try:
             response = requests.post(self.url_api_licenca, json=payload, timeout=10)
             try: dados = response.json()
@@ -114,43 +206,6 @@ class BuscadorPNCP(ctk.CTk):
         except requests.exceptions.RequestException as e:
             if not silencioso: messagebox.showerror("Erro de Conexão", f"Falha de internet:\n{e}")
             return False, None
-    
-    ####Funcao nova de validar licenca
-    def validar_licenca_online(self, cnpj_licenca: str, silencioso=False):
-        if not self.url_api_licenca or "SUA-URL-AQUI" in self.url_api_licenca:
-            if not silencioso: messagebox.showerror("Erro de Configuração", "A URL da API da Vercel não foi configurada.")
-            return False, None
-
-        # Captura o Nome do PC e a Data/Hora local
-        nome_maquina = platform.node()
-        data_hora = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-        # Payload enriquecido com os novos dados de auditoria
-        payload = {
-            "cnpj": cnpj_licenca, 
-            "hwid": self.obter_hwid(),
-            "maquina": nome_maquina,
-            "data_acesso": data_hora
-        }
-        
-        try:
-            response = requests.post(self.url_api_licenca, json=payload, timeout=10)
-            try: 
-                dados = response.json()
-            except:
-                if not silencioso: messagebox.showerror("Erro de Servidor", "A API da Vercel falhou. Verifique a URL.")
-                return False, None
-                
-            if response.status_code == 200 and dados.get("status") == "success": 
-                return True, dados.get("data_validade", "2099-12-31")
-            else:
-                if not silencioso: messagebox.showerror("Licença Inválida", f"Falha na validação:\n{dados.get('message', 'Negado')}")
-                return False, None
-        except requests.exceptions.RequestException as e:
-            if not silencioso: messagebox.showerror("Erro de Conexão", f"Falha de internet:\n{e}")
-            return False, None
-        
-    ####FIM  Funcao nova de validar licenca
 
     def setup_db_licenca(self):
         try:
