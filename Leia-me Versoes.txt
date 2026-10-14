@@ -7,28 +7,7 @@ Versoes
 8.2 - Melhoria no Atualização em massa
 8.3 - Melhoria no log e tela
 8.3.2 - Melhoria na licenca
+8.4.1 - Melhoria no motor de busca para varias palavras
 
 
 
-https://meu-validador-licencas.vercel.app/api/valida
-
-
-versao = "8.3.2"
-
-self.url_api_licenca = "https://meu-validador-licencas.vercel.app/api/valida"
-
-        # ------------------------------------------------------------------
-        # 2. CHAVE DE CRIPTOGRAFIA (Já gerada e pronta a usar!)
-        # ------------------------------------------------------------------
-        self.chave_cripto = b'kM7hQ7uX1x4qW8zF3rN9mT2vP5yC8aD4gG6jH9kL1sM=' 
-
-        #Versão do sistema
-        self.versao_local = "8.3.4"
-        self.url_api_versao = "https://meu-validador-licencas.vercel.app/api/versao"
-        
-        # ------------------------------------------------------------------
-        # CONFIGURAÇÕES DE SEGURANÇA E API
-        # ------------------------------------------------------------------
-        self.url_api_licenca = "https://meu-validador-licencas.vercel.app/api/valida"
-        self.chave_seguranca = b'kM7hQ7uX1x4qW8zF3rN9mT2vP5yC8aD4gG6jH9kL1sM=' 
-        self.db_path = "licitacoes_pncp_v9.db"

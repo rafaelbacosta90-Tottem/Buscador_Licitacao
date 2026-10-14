@@ -23,41 +23,56 @@ import base64
 ctk.set_appearance_mode("Light")
 ctk.set_default_color_theme("blue")
 
+# ==================================================================
+# MOTOR DE BUSCA DE TEXTO (Avançado com suporte a Vírgulas)
+# ==================================================================
 def normalizar_texto(texto: str) -> str:
     if not texto: return ""
     nfkd = unicodedata.normalize("NFKD", str(texto))
     texto_sem_acento = "".join([c for c in nfkd if not unicodedata.combining(c)])
     return texto_sem_acento.lower().strip()
 
-def extrair_radicais(termo: str) -> list:
-    palavras = [p for p in normalizar_texto(termo).split() if len(p) >= 2]
-    radicais = []
-    for p in palavras:
-        rad = p
-        if p.endswith("es") and len(p) > 3: rad = p[:-2]
-        elif p.endswith("s") and len(p) > 3: rad = p[:-1]
-        radicais.append(rad)
-    return radicais
+def extrair_grupos_radicais(termo_multiplo: str) -> list:
+    """Divide 'Arroz, Milho' em listas de radicais individuais (Lógica OU)"""
+    grupos = []
+    for parte in termo_multiplo.split(','):
+        parte = parte.strip()
+        if not parte: continue
+        palavras = [p for p in normalizar_texto(parte).split() if len(p) >= 2]
+        radicais = []
+        for p in palavras:
+            rad = p
+            if p.endswith("es") and len(p) > 3: rad = p[:-2]
+            elif p.endswith("s") and len(p) > 3: rad = p[:-1]
+            radicais.append(rad)
+        if radicais:
+            grupos.append(radicais)
+    return grupos
 
-def contem_palavras_chave(texto: str, radicais: list) -> bool:
-    if not radicais: return False
-    return all(rad in normalizar_texto(texto) for rad in radicais)
+def texto_atende_busca(texto: str, grupos_radicais: list) -> bool:
+    """Retorna True se o texto bater com PELO MENOS UM dos termos separados por vírgula"""
+    if not grupos_radicais: return False
+    texto_norm = normalizar_texto(texto)
+    for radicais_frase in grupos_radicais:
+        if all(rad in texto_norm for rad in radicais_frase):
+            return True
+    return False
 
 
 class BuscadorPNCP(ctk.CTk):
     def __init__(self):
         super().__init__()
 
-        self.title("Buscador Multi-Portal de Licitações & Preços - Compras Públicas")
+        # ------------------------------------------------------------------
+        # CONFIGURAÇÕES DE VERSÃO E SEGURANÇA
+        # ------------------------------------------------------------------
+        self.versao_local = "8.4.1"
+        
+        self.title(f"Buscador Multi-Portal de Licitações & Preços - Compras Públicas | Versão {self.versao_local}")
         self.geometry("1180x920")
         
         # Opcional: Se quiser que a logomarca apareça também na janela
         # self.iconbitmap("icone.ico")
-
-        # ------------------------------------------------------------------
-        # CONFIGURAÇÕES DE VERSÃO E SEGURANÇA
-        # ------------------------------------------------------------------
-        self.versao_local = "8.4"
         
         # INSIRA AQUI AS SUAS URLs DA VERCEL
         self.url_api_versao = "https://meu-validador-licencas.vercel.app/api/versao"
@@ -83,15 +98,12 @@ class BuscadorPNCP(ctk.CTk):
     # SISTEMA DE INICIALIZAÇÃO, ATUALIZAÇÃO E LICENÇA
     # ==================================================================
     def _rotina_de_arranque(self):
-        # 1. Verifica se há versão nova/obrigatória antes de tudo
         if not self.verificar_versao_inicial():
-            return # Bloqueia o início para atualizar
+            return 
 
-        # 2. Configura a base de dados de licença
         self.setup_db_licenca()
         cnpj_salvo = self.get_cnpj_registrado()
 
-        # 3. Valida a licença
         if not cnpj_salvo:
             self.solicitar_registro_cnpj()
         else:
@@ -102,7 +114,6 @@ class BuscadorPNCP(ctk.CTk):
                 self.solicitar_registro_cnpj()
 
     def verificar_versao_inicial(self):
-        """Verifica atualizações. Retorna True se puder iniciar, False se for bloqueado."""
         try:
             res = requests.get(self.url_api_versao, timeout=5)
             if res.status_code != 200: 
@@ -117,13 +128,11 @@ class BuscadorPNCP(ctk.CTk):
             v_nuvem = float(versao_nuvem)
             v_minima = float(versao_minima)
 
-            # REGRA OBRIGATÓRIA
             if v_local < v_minima:
                 messagebox.showerror("Atualização Obrigatória", f"A sua versão ({v_local}) foi descontinuada.\nO sistema será atualizado agora para a versão {v_nuvem}.")
                 self.executar_download_e_atualizacao(link_download)
                 return False 
                 
-            # REGRA OPCIONAL
             elif v_local < v_nuvem:
                 resposta = messagebox.askyesno("Atualização Disponível", f"Nova versão {v_nuvem} encontrada!\n\nDeseja atualizar o sistema agora? (Recomendado)")
                 if resposta:
@@ -135,7 +144,6 @@ class BuscadorPNCP(ctk.CTk):
             return True 
 
     def executar_download_e_atualizacao(self, link_download):
-        """Baixa o novo .exe e cria o script de auto-substituição."""
         try:
             janela_aviso = ctk.CTkToplevel(self)
             janela_aviso.title("A Atualizar")
@@ -467,7 +475,7 @@ del "%~f0"
         self.lbl_termo = ctk.CTkLabel(self.frame_busca, text="Produto/Serviço (Termo de busca):", font=("Arial", 12, "bold"))
         self.lbl_termo.grid(row=0, column=0, sticky="w", padx=5, pady=5)
 
-        self.ent_termo = ctk.CTkEntry(self.frame_busca, width=300, placeholder_text="Ex: ALFAJOR, ARROZ, NOTEBOOK")
+        self.ent_termo = ctk.CTkEntry(self.frame_busca, width=300, placeholder_text="Ex: Arroz, Milho, Feijão")
         self.ent_termo.grid(row=0, column=1, columnspan=2, sticky="we", padx=5, pady=5)
         self.ent_termo.bind("<Return>", lambda e: self.iniciar_busca())
 
@@ -825,8 +833,10 @@ del "%~f0"
     def _buscar_local_db_thread(self, termo, uf_selecionada, modalidade_id, alvo_busca, portais_selecionados):
         self.after(0, self._limpar_tabela)
         self.after(0, lambda: [self.txt_detalhes.configure(state="normal"), self.txt_detalhes.delete("1.0", "end"), self.txt_detalhes.configure(state="disabled"), self.btn_arquivos.configure(state="disabled")])
-        radicais_busca, termo_norm, count = extrair_radicais(termo), normalizar_texto(termo), 0
-        self.registrar_log(f"🔎 Buscando termo na Base Local: '{termo}'")
+        
+        grupos_busca = extrair_grupos_radicais(termo)
+        count = 0
+        self.registrar_log(f"🔎 Buscando na Base Local: '{termo}'")
 
         try:
             with sqlite3.connect(self.db_path) as conn:
@@ -842,7 +852,8 @@ del "%~f0"
             for row in linhas:
                 if self.cancelar_busca: break
                 texto_alvo = row[3] if alvo_busca == "Apenas no Item" else (row[2] if alvo_busca == "Apenas no Objeto do Edital" else f"{row[3]} {row[2]}")
-                if (radicais_busca and contem_palavras_chave(texto_alvo, radicais_busca)) or (termo_norm and termo_norm in normalizar_texto(texto_alvo)):
+                
+                if texto_atende_busca(texto_alvo, grupos_busca):
                     self.after(0, lambda r=row: self._adicionar_item_tabela(r[0], r[1], r[14], f"{r[12]}/{r[11]}" if r[12] and r[11] else "N/I", r[3], r[4], r[5], r[6], r[7], r[8], r[9], r[10], r[11], r[12], r[13], r[2]))
                     count += 1
             if not self.cancelar_busca: self.after(0, lambda: self._finalizar_busca_ui(count, f"{count} itens encontrados na Base Local."))
@@ -853,8 +864,8 @@ del "%~f0"
         self.after(0, lambda: [self.txt_detalhes.configure(state="normal"), self.txt_detalhes.delete("1.0", "end"), self.txt_detalhes.configure(state="disabled"), self.btn_arquivos.configure(state="disabled")])
         self.resultados_pncp = []
         try:
-            radicais_busca = extrair_radicais(termo)
-            self.registrar_log(f"🔎 Iniciando busca no PNCP Web para o termo: '{termo}'")
+            grupos_busca = extrair_grupos_radicais(termo)
+            self.registrar_log(f"🔎 Iniciando busca no PNCP Web para: '{termo}'")
             url_base = "https://pncp.gov.br/api/consulta/v1/contratacoes/proposta" if status_busca == "A Receber/Recebendo Proposta" else "https://pncp.gov.br/api/consulta/v1/contratacoes/publicacao"
             params_base = {"dataFinal": data_fim} if status_busca == "A Receber/Recebendo Proposta" else {"dataInicial": data_inicio, "dataFinal": data_fim}
             if uf_selecionada != "Todas": params_base["uf"] = uf_selecionada
@@ -867,13 +878,13 @@ del "%~f0"
                     params.update({"codigoModalidadeContratacao": str(cod_modalidade), "pagina": str(pag), "tamanhoPagina": "50"})
                     res = self._get_com_retentativa(url_base, params=params, timeout=15, tipo_operacao="busca")
                     if not res or res.status_code != 200 or not res.json().get("data"): break
-                    self._obter_e_salvar_itens_paginados(res.json().get("data"), set(), cod_modalidade, alvo_busca=alvo_busca, radicais_busca=radicais_busca, portais_selecionados=portais_selecionados, chaves_cadastradas=set(), tipo_operacao="busca")
+                    self._obter_e_salvar_itens_paginados(res.json().get("data"), set(), cod_modalidade, alvo_busca=alvo_busca, grupos_busca=grupos_busca, portais_selecionados=portais_selecionados, chaves_cadastradas=set(), tipo_operacao="busca")
                     if res.json().get("paginasRestantes", 0) <= 0: break
                     pag += 1
             if not self.cancelar_busca: self.after(0, lambda: self._finalizar_busca_ui(len(self.resultados_pncp), f"{len(self.resultados_pncp)} itens online listados."))
         except Exception as e: self.after(0, lambda: self._finalizar_busca_com_erro(str(e)))
 
-    def _obter_e_salvar_itens_paginados(self, lista_contratos, contratacoes_processadas, cod_modalidade, alvo_busca="Todos", radicais_busca=None, portais_selecionados=None, chaves_cadastradas=None, tipo_operacao="busca"):
+    def _obter_e_salvar_itens_paginados(self, lista_contratos, contratacoes_processadas, cod_modalidade, alvo_busca="Todos", grupos_busca=None, portais_selecionados=None, chaves_cadastradas=None, tipo_operacao="busca"):
         if chaves_cadastradas is None: chaves_cadastradas = set()
         itens_salvos_count, mod_nome = 0, next((k for k, v in self.modalidades_map.items() if v == str(cod_modalidade)), "Não informada")
 
@@ -906,7 +917,9 @@ del "%~f0"
                             desc_bruta = it.get("descricao", "")
                             desc_item = f"{mat_nome} - {desc_bruta}" if mat_nome and desc_bruta else (mat_nome or desc_bruta or objeto_contrato)
                             
-                            if radicais_busca and not contem_palavras_chave(desc_item if alvo_busca == "Apenas no Item" else (objeto_contrato if alvo_busca == "Apenas no Objeto do Edital" else f"{desc_item} {objeto_contrato}"), radicais_busca): continue
+                            texto_alvo = desc_item if alvo_busca == "Apenas no Item" else (objeto_contrato if alvo_busca == "Apenas no Objeto do Edital" else f"{desc_item} {objeto_contrato}")
+                            
+                            if grupos_busca and not texto_atende_busca(texto_alvo, grupos_busca): continue
 
                             chave_u = f"{cnpj}_{ano}_{seq}_{num_item}"
                             if chave_u not in chaves_cadastradas:
