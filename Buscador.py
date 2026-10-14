@@ -24,7 +24,7 @@ ctk.set_appearance_mode("Light")
 ctk.set_default_color_theme("blue")
 
 # ==================================================================
-# MOTOR DE BUSCA DE TEXTO (Avançado com suporte a Vírgulas)
+# MOTOR DE BUSCA DE TEXTO E FORMATAÇÃO
 # ==================================================================
 def normalizar_texto(texto: str) -> str:
     if not texto: return ""
@@ -33,7 +33,6 @@ def normalizar_texto(texto: str) -> str:
     return texto_sem_acento.lower().strip()
 
 def extrair_grupos_radicais(termo_multiplo: str) -> list:
-    """Divide 'Arroz, Milho' em listas de radicais individuais (Lógica OU)"""
     grupos = []
     for parte in termo_multiplo.split(','):
         parte = parte.strip()
@@ -50,13 +49,20 @@ def extrair_grupos_radicais(termo_multiplo: str) -> list:
     return grupos
 
 def texto_atende_busca(texto: str, grupos_radicais: list) -> bool:
-    """Retorna True se o texto bater com PELO MENOS UM dos termos separados por vírgula"""
     if not grupos_radicais: return False
     texto_norm = normalizar_texto(texto)
     for radicais_frase in grupos_radicais:
         if all(rad in texto_norm for rad in radicais_frase):
             return True
     return False
+
+def formatar_data_hora(data_iso: str) -> str:
+    """Converte '2024-05-10T09:00:00' para '10/05/2024 09:00'"""
+    if not data_iso: return "Não informada"
+    try:
+        return datetime.datetime.fromisoformat(data_iso.split('.')[0]).strftime("%d/%m/%Y %H:%M")
+    except:
+        return str(data_iso)[:16].replace("T", " ")
 
 
 class BuscadorPNCP(ctk.CTk):
@@ -66,7 +72,7 @@ class BuscadorPNCP(ctk.CTk):
         # ------------------------------------------------------------------
         # CONFIGURAÇÕES DE VERSÃO E SEGURANÇA
         # ------------------------------------------------------------------
-        self.versao_local = "8.4.1"
+        self.versao_local = "8.4"
         
         self.title(f"Buscador Multi-Portal de Licitações & Preços - Compras Públicas | Versão {self.versao_local}")
         self.geometry("1180x920")
@@ -83,7 +89,6 @@ class BuscadorPNCP(ctk.CTk):
 
         self.withdraw()
 
-        # Flags de Multitarefa
         self.cancelar_busca = False
         self.cancelar_carga = False
         self.is_carga_running = False
@@ -315,12 +320,21 @@ del "%~f0"
         self.categorias_map = {"Todas": "", "Cessão": "1", "Compras": "2", "Informática (TIC)": "3", "Internacional": "4", "Locação Imóveis": "5", "Mão de Obra": "6", "Obras": "7", "Serviços": "8", "Serviços de Engenharia": "9", "Serviços de Saúde": "10", "Alienação de bens móveis/imóveis": "11"}
         self.modalidades_map = {"Principais (Pregão, Dispensa, Conc.)": "", "1 - Leilão Eletrônico": "1", "2 - Diálogo Competitivo": "2", "3 - Concurso": "3", "4 - Concorrência Eletrônica": "4", "5 - Concorrência Presencial": "5", "6 - Pregão Eletrônico": "6", "7 - Pregão Presencial": "7", "8 - Dispensa de Licitação": "8", "9 - Inexigibilidade": "9", "10 - Manifestação de Interesse": "10", "11 - Pré-qualificação": "11", "12 - Credenciamento": "12", "13 - Leilão Presencial": "13"}
         self.lista_ufs = ["Todas", "AC", "AL", "AP", "AM", "BA", "CE", "DF", "ES", "GO", "MA", "MT", "MS", "MG", "PA", "PB", "PR", "PE", "PI", "RJ", "RN", "RS", "RO", "RR", "SC", "SP", "SE", "TO"]
-        self.http_session = requests.Session()
-        self.http_session.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)", "Accept": "application/json, text/plain, */*", "Referer": "https://pncp.gov.br/"})
+        
+        self._renovar_sessao_http()
         
         self.init_db()
         self.criar_menu_superior()
         self.criar_interface()
+
+    def _renovar_sessao_http(self):
+        """Cria ou recria a conexão de rede limpa (Kill Switch)"""
+        self.http_session = requests.Session()
+        self.http_session.headers.update({
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)", 
+            "Accept": "application/json, text/plain, */*", 
+            "Referer": "https://pncp.gov.br/"
+        })
 
     def criar_menu_superior(self):
         self.menubar = tk.Menu(self)
@@ -432,21 +446,27 @@ del "%~f0"
     def parar_carga_background(self):
         if not messagebox.askyesno("Parar", "Deseja parar a Atualização?\nOs dados já salvos no banco não serão perdidos."): return
         self.cancelar_carga = True
-        self.registrar_log("⚠️ Atualização cancelada pelo usuário.")
         self.lbl_status.configure(text="A interromper processo...", text_color="#e74c3c")
+        
+        try: self.http_session.close()
+        except: pass
+        self._renovar_sessao_http()
+        
+        self.set_estado_menu_carga(False)
+        self.registrar_log("🛑 Atualização em massa cancelada instantaneamente pelo utilizador.")
 
     def init_db(self):
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
-            cursor.execute("CREATE TABLE IF NOT EXISTS editais_itens (id INTEGER PRIMARY KEY AUTOINCREMENT, orgao TEXT, uf TEXT, objeto_contrato TEXT, desc_item TEXT, quantidade REAL, vlr_unit_est TEXT, vlr_total_est TEXT, vlr_unit_hom TEXT, vlr_total_hom TEXT, data_publicacao TEXT, cnpj TEXT, ano INTEGER, sequencial INTEGER, numero_item INTEGER, modalidade_id TEXT, modalidade_nome TEXT, portal_nome TEXT, data_cadastro TIMESTAMP DEFAULT CURRENT_TIMESTAMP, UNIQUE(cnpj, ano, sequencial, numero_item, desc_item) ON CONFLICT REPLACE)")
+            cursor.execute("CREATE TABLE IF NOT EXISTS editais_itens (id INTEGER PRIMARY KEY AUTOINCREMENT, orgao TEXT, uf TEXT, objeto_contrato TEXT, desc_item TEXT, quantidade REAL, vlr_unit_est TEXT, vlr_total_est TEXT, vlr_unit_hom TEXT, vlr_total_hom TEXT, data_publicacao TEXT, data_abertura TEXT, data_encerramento TEXT, cnpj TEXT, ano INTEGER, sequencial INTEGER, numero_item INTEGER, modalidade_id TEXT, modalidade_nome TEXT, portal_nome TEXT, data_cadastro TIMESTAMP DEFAULT CURRENT_TIMESTAMP, UNIQUE(cnpj, ano, sequencial, numero_item, desc_item) ON CONFLICT REPLACE)")
             conn.commit()
 
     def salvar_item_db(self, item_dict):
         try:
             with sqlite3.connect(self.db_path, timeout=10) as conn:
                 cursor = conn.cursor()
-                cursor.execute("INSERT OR REPLACE INTO editais_itens (orgao, uf, objeto_contrato, desc_item, quantidade, vlr_unit_est, vlr_total_est, vlr_unit_hom, vlr_total_hom, data_publicacao, cnpj, ano, sequencial, numero_item, modalidade_id, modalidade_nome, portal_nome) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (
-                    item_dict.get("Orgao"), item_dict.get("UF"), item_dict.get("ObjetoContrato"), item_dict.get("DescItem"), item_dict.get("Qtd"), item_dict.get("Vlr Unit Est"), item_dict.get("Vlr Total Est"), item_dict.get("Vlr Unit Hom"), item_dict.get("Vlr Total Hom"), item_dict.get("Data Pub"), item_dict.get("CNPJ", ""), item_dict.get("Ano", 0), item_dict.get("Sequencial", 0), item_dict.get("NumeroItem", 0), item_dict.get("ModalidadeID", ""), item_dict.get("ModalidadeNome", ""), item_dict.get("PortalNome", "")
+                cursor.execute("INSERT OR REPLACE INTO editais_itens (orgao, uf, objeto_contrato, desc_item, quantidade, vlr_unit_est, vlr_total_est, vlr_unit_hom, vlr_total_hom, data_publicacao, data_abertura, data_encerramento, cnpj, ano, sequencial, numero_item, modalidade_id, modalidade_nome, portal_nome) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (
+                    item_dict.get("Orgao"), item_dict.get("UF"), item_dict.get("ObjetoContrato"), item_dict.get("DescItem"), item_dict.get("Qtd"), item_dict.get("Vlr Unit Est"), item_dict.get("Vlr Total Est"), item_dict.get("Vlr Unit Hom"), item_dict.get("Vlr Total Hom"), item_dict.get("Data Pub"), item_dict.get("Data Abertura"), item_dict.get("Data Encerramento"), item_dict.get("CNPJ", ""), item_dict.get("Ano", 0), item_dict.get("Sequencial", 0), item_dict.get("NumeroItem", 0), item_dict.get("ModalidadeID", ""), item_dict.get("ModalidadeNome", ""), item_dict.get("PortalNome", "")
                 ))
                 conn.commit()
         except: pass
@@ -551,7 +571,7 @@ del "%~f0"
         self.frame_tabela = ctk.CTkFrame(self.tab_pesquisa)
         self.frame_tabela.pack(fill="both", expand=True, padx=10, pady=2)
 
-        colunas = ("orgao", "uf", "portal", "edital", "objeto", "qtd", "vlr_unit_est", "vlr_total_est", "vlr_unit_hom", "vlr_total_hom", "data", "cnpj", "ano", "seq", "modalidade_nome", "objeto_contrato")
+        colunas = ("orgao", "uf", "portal", "edital", "objeto", "qtd", "vlr_unit_est", "vlr_total_est", "vlr_unit_hom", "vlr_total_hom", "data", "data_abertura", "data_encerramento", "cnpj", "ano", "seq", "modalidade_nome", "objeto_contrato")
         self.tree = ttk.Treeview(self.frame_tabela, columns=colunas, show="headings")
         self.tree.heading("orgao", text="Órgão / Unidade")
         self.tree.heading("uf", text="UF")
@@ -564,6 +584,8 @@ del "%~f0"
         self.tree.heading("vlr_unit_hom", text="Unit. Homologado")
         self.tree.heading("vlr_total_hom", text="Total Homologado")
         self.tree.heading("data", text="Data Pub.")
+        self.tree.heading("data_abertura", text="Abertura")
+        self.tree.heading("data_encerramento", text="Encerramento (Disputa)")
 
         self.tree.column("orgao", width=180, minwidth=120, stretch=tk.YES)
         self.tree.column("uf", width=40, anchor="center", minwidth=40, stretch=tk.YES)
@@ -576,6 +598,8 @@ del "%~f0"
         self.tree.column("vlr_unit_hom", width=100, anchor="e", minwidth=80, stretch=tk.YES)
         self.tree.column("vlr_total_hom", width=100, anchor="e", minwidth=80, stretch=tk.YES)
         self.tree.column("data", width=90, anchor="center", minwidth=80, stretch=tk.YES)
+        self.tree.column("data_abertura", width=130, anchor="center", minwidth=90, stretch=tk.YES)
+        self.tree.column("data_encerramento", width=130, anchor="center", minwidth=90, stretch=tk.YES)
 
         self.aplicar_colunas_grid()
 
@@ -589,13 +613,13 @@ del "%~f0"
         self.frame_detalhes = ctk.CTkFrame(self.tab_pesquisa, fg_color="transparent")
         self.frame_detalhes.pack(fill="x", padx=10, pady=(2, 10))
 
-        self.txt_detalhes = ctk.CTkTextbox(self.frame_detalhes, height=80, font=("Arial", 12), text_color="#2c3e50")
+        self.txt_detalhes = ctk.CTkTextbox(self.frame_detalhes, height=90, font=("Arial", 12), text_color="#2c3e50")
         self.txt_detalhes.pack(side="left", fill="both", expand=True, padx=(0, 5))
         self.txt_detalhes.insert("end", "Selecione um item na tabela acima para visualizar a descrição multilinha aqui.")
         self.txt_detalhes.configure(state="disabled")
 
         self.btn_arquivos = ctk.CTkButton(
-            self.frame_detalhes, text="📂 Ver Arquivos\n(Editais/Anexos)", width=140, height=80,
+            self.frame_detalhes, text="📂 Ver Arquivos\n(Editais/Anexos)", width=140, height=90,
             fg_color="#d35400", hover_color="#e67e22", state="disabled", font=("Arial", 12, "bold"), command=self.abrir_janela_arquivos
         )
         self.btn_arquivos.pack(side="right")
@@ -612,7 +636,7 @@ del "%~f0"
         if self.config_precos["vlr_total_est"].get(): colunas_visiveis.append("vlr_total_est")
         if self.config_precos["vlr_unit_hom"].get(): colunas_visiveis.append("vlr_unit_hom")
         if self.config_precos["vlr_total_hom"].get(): colunas_visiveis.append("vlr_total_hom")
-        colunas_visiveis.append("data")
+        colunas_visiveis.extend(["data", "data_abertura", "data_encerramento"])
         self.tree.configure(displaycolumns=colunas_visiveis)
 
     def abrir_menu_configuracao(self):
@@ -673,19 +697,28 @@ del "%~f0"
 
     def cancelar_busca_manual(self):
         self.cancelar_busca = True
-        self.lbl_status.configure(text="A cancelar pesquisa...", text_color="#e74c3c")
-        self.btn_buscar.configure(state="disabled")
+        self.lbl_status.configure(text="Busca cancelada.", text_color="#e74c3c")
+        
+        self.btn_buscar.configure(text="🔍 Pesquisar", fg_color=self.default_btn_buscar_fg, hover_color=self.default_btn_buscar_hover, command=self.iniciar_busca, state="normal")
+        self.btn_exportar.configure(state="normal" if len(self.tree.get_children()) > 0 else "disabled")
+
+        try: self.http_session.close()
+        except: pass
+        self._renovar_sessao_http()
+        
+        self.registrar_log("🛑 Pesquisa interrompida instantaneamente.")
 
     def _ao_selecionar_tabela(self, event):
         item_id = self.tree.focus()
         if not item_id: return
         valores = self.tree.item(item_id, "values")
-        if len(valores) >= 16:
+        if len(valores) >= 18:
             orgao, uf, portal, edital_resumo, desc_item_completo = valores[0], valores[1], valores[2], valores[3], valores[4]
-            cnpj, ano, seq, mod_nome, objeto_geral = valores[11], valores[12], valores[13], valores[14], valores[15]
+            data_abertura, data_encerramento = valores[11], valores[12]
+            cnpj, ano, seq, mod_nome, objeto_geral = valores[13], valores[14], valores[15], valores[16], valores[17]
             self.item_selecionado_doc = (cnpj, ano, seq)
             self.btn_arquivos.configure(state="normal")
-            texto_exibicao = f"🏢 ÓRGÃO: {orgao} ({uf})   |   🌐 PORTAL: {portal}\n📄 EDITAL: {edital_resumo}  |  ⚖️ MODALIDADE: {mod_nome}  |  🔗 Link: https://pncp.gov.br/app/editais/{cnpj}/{ano}/{seq}\n🎯 OBJETO GERAL DO EDITAL: {objeto_geral}\n📦 DESCRIÇÃO DO ITEM: {desc_item_completo}"
+            texto_exibicao = f"🏢 ÓRGÃO: {orgao} ({uf})   |   🌐 PORTAL: {portal}\n📄 EDITAL: {edital_resumo}  |  ⚖️ MODALIDADE: {mod_nome}  |  🔗 Link: https://pncp.gov.br/app/editais/{cnpj}/{ano}/{seq}\n⏰ DISPUTA: Abertura em {data_abertura} - Encerramento em {data_encerramento}\n🎯 OBJETO GERAL: {objeto_geral}\n📦 DESCRIÇÃO DO ITEM: {desc_item_completo}"
             self.txt_detalhes.configure(state="normal")
             self.txt_detalhes.delete("1.0", "end")
             self.txt_detalhes.insert("end", texto_exibicao)
@@ -695,7 +728,7 @@ del "%~f0"
         item_id = self.tree.focus()
         if not item_id: return
         valores = self.tree.item(item_id, "values")
-        if len(valores) >= 14: webbrowser.open(f"https://pncp.gov.br/app/editais/{valores[11]}/{valores[12]}/{valores[13]}")
+        if len(valores) >= 14: webbrowser.open(f"https://pncp.gov.br/app/editais/{valores[13]}/{valores[14]}/{valores[15]}")
 
     def abrir_janela_arquivos(self):
         if not self.item_selecionado_doc: return
@@ -710,7 +743,7 @@ del "%~f0"
                 dados = res.json()
                 self.after(0, lambda: self.mostrar_janela_arquivos(dados.get("data", []) if isinstance(dados, dict) else (dados if isinstance(dados, list) else [])))
             else: self.after(0, lambda: messagebox.showinfo("Ficheiros", "Nenhum documento anexado foi encontrado."))
-        except Exception as e: self.after(0, lambda: messagebox.showerror("Erro", f"Erro de conexão: {e}"))
+        except Exception as e: self.after(0, lambda erro=str(e): messagebox.showerror("Erro", f"Erro de conexão: {erro}"))
         finally: self.after(0, lambda: self.btn_arquivos.configure(text="📂 Ver Arquivos\n(Editais/Anexos)", state="normal"))
 
     def mostrar_janela_arquivos(self, arquivos):
@@ -755,9 +788,12 @@ del "%~f0"
     def _get_com_retentativa(self, url, params, max_tentativas=3, timeout=15, tipo_operacao="busca"):
         for tentativa in range(1, max_tentativas + 1):
             if (self.cancelar_busca if tipo_operacao == "busca" else self.cancelar_carga): return None
-            try: return self.http_session.get(url, params=params, timeout=timeout)
+            try: 
+                return self.http_session.get(url, params=params, timeout=(3.0, timeout))
             except Exception as e:
-                if tentativa == max_tentativas or (self.cancelar_busca if tipo_operacao == "busca" else self.cancelar_carga): 
+                if (self.cancelar_busca if tipo_operacao == "busca" else self.cancelar_carga): 
+                    return None
+                if tentativa == max_tentativas: 
                     raise e
                 self.registrar_log(f"⏳ Instabilidade na rede. Tentativa {tentativa}/{max_tentativas} aguardando...")
                 for _ in range(30):
@@ -841,7 +877,7 @@ del "%~f0"
         try:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
-                sql, params = "SELECT orgao, uf, objeto_contrato, desc_item, quantidade, vlr_unit_est, vlr_total_est, vlr_unit_hom, vlr_total_hom, data_publicacao, cnpj, ano, sequencial, modalidade_nome, portal_nome FROM editais_itens WHERE 1=1", []
+                sql, params = "SELECT orgao, uf, objeto_contrato, desc_item, quantidade, vlr_unit_est, vlr_total_est, vlr_unit_hom, vlr_total_hom, data_publicacao, data_abertura, data_encerramento, cnpj, ano, sequencial, modalidade_nome, portal_nome FROM editais_itens WHERE 1=1", []
                 if uf_selecionada != "Todas": sql += " AND uf = ?"; params.append(uf_selecionada)
                 if modalidade_id: sql += " AND modalidade_id = ?"; params.append(modalidade_id)
                 if portais_selecionados:
@@ -854,10 +890,10 @@ del "%~f0"
                 texto_alvo = row[3] if alvo_busca == "Apenas no Item" else (row[2] if alvo_busca == "Apenas no Objeto do Edital" else f"{row[3]} {row[2]}")
                 
                 if texto_atende_busca(texto_alvo, grupos_busca):
-                    self.after(0, lambda r=row: self._adicionar_item_tabela(r[0], r[1], r[14], f"{r[12]}/{r[11]}" if r[12] and r[11] else "N/I", r[3], r[4], r[5], r[6], r[7], r[8], r[9], r[10], r[11], r[12], r[13], r[2]))
+                    self.after(0, lambda r=row: self._adicionar_item_tabela(r[0], r[1], r[16], f"{r[14]}/{r[13]}" if r[14] and r[13] else "N/I", r[3], r[4], r[5], r[6], r[7], r[8], r[9], r[10], r[11], r[12], r[13], r[14], r[15], r[2]))
                     count += 1
             if not self.cancelar_busca: self.after(0, lambda: self._finalizar_busca_ui(count, f"{count} itens encontrados na Base Local."))
-        except Exception as e: self.after(0, lambda: self._finalizar_busca_com_erro(str(e)))
+        except Exception as e: self.after(0, lambda erro=str(e): self._finalizar_busca_com_erro(erro))
 
     def _buscar_api_pncp_thread(self, termo, data_inicio, data_fim, status_busca, modalidade_id, uf_selecionada, alvo_busca, portais_selecionados):
         self.after(0, self._limpar_tabela)
@@ -882,7 +918,7 @@ del "%~f0"
                     if res.json().get("paginasRestantes", 0) <= 0: break
                     pag += 1
             if not self.cancelar_busca: self.after(0, lambda: self._finalizar_busca_ui(len(self.resultados_pncp), f"{len(self.resultados_pncp)} itens online listados."))
-        except Exception as e: self.after(0, lambda: self._finalizar_busca_com_erro(str(e)))
+        except Exception as e: self.after(0, lambda erro=str(e): self._finalizar_busca_com_erro(erro))
 
     def _obter_e_salvar_itens_paginados(self, lista_contratos, contratacoes_processadas, cod_modalidade, alvo_busca="Todos", grupos_busca=None, portais_selecionados=None, chaves_cadastradas=None, tipo_operacao="busca"):
         if chaves_cadastradas is None: chaves_cadastradas = set()
@@ -899,6 +935,10 @@ del "%~f0"
             contratacoes_processadas.add(chave_edital)
 
             orgao, uf, data_pub, objeto_contrato = contrato.get("orgaoEntidade", {}).get("razaoSocial", "N/I"), contrato.get("unidadeOrgao", {}).get("ufSigla", "-"), str(contrato.get("dataPublicacaoPncp", ""))[:10], contrato.get("objeto", "")
+
+            # Extração e Formatação das Novas Datas
+            data_abertura = formatar_data_hora(contrato.get("dataAberturaProposta"))
+            data_encerramento = formatar_data_hora(contrato.get("dataEncerramentoProposta"))
 
             if cnpj and ano and seq:
                 pag_item = 1
@@ -925,11 +965,12 @@ del "%~f0"
                             if chave_u not in chaves_cadastradas:
                                 chaves_cadastradas.add(chave_u)
                                 qtd, v_u_est, v_t_est, v_u_hom, v_t_hom = float(it.get("quantidade", 1)), it.get("valorUnitarioEstimado"), it.get("valorTotalEstimado"), it.get("valorUnitarioHomologado"), it.get("valorTotalHomologado") or it.get("valorTotal")
-                                reg = {"Orgao": orgao, "UF": uf, "ObjetoContrato": objeto_contrato, "DescItem": desc_item, "Qtd": qtd, "Vlr Unit Est": self.formatar_moeda(v_u_est), "Vlr Total Est": self.formatar_moeda(v_t_est), "Vlr Unit Hom": self.formatar_moeda(v_u_hom), "Vlr Total Hom": self.formatar_moeda(v_t_hom), "Data Pub": data_pub, "CNPJ": cnpj, "Ano": ano, "Sequencial": seq, "NumeroItem": num_item, "ModalidadeID": str(cod_modalidade), "ModalidadeNome": mod_nome, "PortalNome": portal_nome}
+                                
+                                reg = {"Orgao": orgao, "UF": uf, "ObjetoContrato": objeto_contrato, "DescItem": desc_item, "Qtd": qtd, "Vlr Unit Est": self.formatar_moeda(v_u_est), "Vlr Total Est": self.formatar_moeda(v_t_est), "Vlr Unit Hom": self.formatar_moeda(v_u_hom), "Vlr Total Hom": self.formatar_moeda(v_t_hom), "Data Pub": data_pub, "Data Abertura": data_abertura, "Data Encerramento": data_encerramento, "CNPJ": cnpj, "Ano": ano, "Sequencial": seq, "NumeroItem": num_item, "ModalidadeID": str(cod_modalidade), "ModalidadeNome": mod_nome, "PortalNome": portal_nome}
                                 
                                 if tipo_operacao == "busca" or (tipo_operacao == "carga" and self.mostrar_carga_no_grid):
                                     self.resultados_pncp.append(reg)
-                                    self.after(0, lambda r=reg: self._adicionar_item_tabela(r["Orgao"], r["UF"], r["PortalNome"], f"{r['Sequencial']}/{r['Ano']}", r["DescItem"], r["Qtd"], r["Vlr Unit Est"], r["Vlr Total Est"], r["Vlr Unit Hom"], r["Vlr Total Hom"], r["Data Pub"], r["CNPJ"], r["Ano"], r["Sequencial"], r["ModalidadeNome"], r["ObjetoContrato"]))
+                                    self.after(0, lambda r=reg: self._adicionar_item_tabela(r["Orgao"], r["UF"], r["PortalNome"], f"{r['Sequencial']}/{r['Ano']}", r["DescItem"], r["Qtd"], r["Vlr Unit Est"], r["Vlr Total Est"], r["Vlr Unit Hom"], r["Vlr Total Hom"], r["Data Pub"], r["Data Abertura"], r["Data Encerramento"], r["CNPJ"], r["Ano"], r["Sequencial"], r["ModalidadeNome"], r["ObjetoContrato"]))
                                     self.after(0, lambda: self.tree.yview_moveto(1))
                                     
                                 self.salvar_item_db(reg)
@@ -948,8 +989,8 @@ del "%~f0"
     def _limpar_tabela(self):
         for row in self.tree.get_children(): self.tree.delete(row)
 
-    def _adicionar_item_tabela(self, orgao, uf, portal, edital, desc, qtd, unit_est, total_est, unit_hom, total_hom, data_pub, cnpj, ano, seq, mod_nome, obj_contrato):
-        self.tree.insert("", "end", values=(orgao, uf, portal, edital, desc, qtd, unit_est, total_est, unit_hom, total_hom, data_pub, cnpj, ano, seq, mod_nome, obj_contrato))
+    def _adicionar_item_tabela(self, orgao, uf, portal, edital, desc, qtd, unit_est, total_est, unit_hom, total_hom, data_pub, data_abertura, data_encerramento, cnpj, ano, seq, mod_nome, obj_contrato):
+        self.tree.insert("", "end", values=(orgao, uf, portal, edital, desc, qtd, unit_est, total_est, unit_hom, total_hom, data_pub, data_abertura, data_encerramento, cnpj, ano, seq, mod_nome, obj_contrato))
 
     def _finalizar_busca_ui(self, qtd, msg_status):
         self.btn_buscar.configure(text="🔍 Pesquisar", fg_color=self.default_btn_buscar_fg, hover_color=self.default_btn_buscar_hover, command=self.iniciar_busca, state="normal")
