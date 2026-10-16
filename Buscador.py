@@ -20,7 +20,6 @@ import requests
 import hmac
 import hashlib
 import base64
-#import google.generativeai as genai
 
 # Importação da biblioteca de leitura de PDFs (Fallback se não instalada)
 try:
@@ -29,7 +28,7 @@ try:
 except ImportError:
     HAS_PYPDF = False
 
-# Configuração visual do CustomTkinter
+# Configuração visual do CustomTkinter (Design Moderno)
 ctk.set_appearance_mode("Light")
 ctk.set_default_color_theme("blue")
 
@@ -149,10 +148,44 @@ class DatabaseManager:
                     portal_nome TEXT, data_cadastro TIMESTAMP DEFAULT CURRENT_TIMESTAMP, 
                     UNIQUE(cnpj, ano, sequencial, numero_item, desc_item) ON CONFLICT REPLACE
                 )""")
+                
+                try: cursor.execute("ALTER TABLE editais_itens ADD COLUMN analise_ia TEXT")
+                except sqlite3.OperationalError: pass # Coluna já existe
+                
                 cursor.execute("CREATE TABLE IF NOT EXISTS usuario_licenca (id INTEGER PRIMARY KEY AUTOINCREMENT, token TEXT NOT NULL)")
+                cursor.execute("CREATE TABLE IF NOT EXISTS api_keys (provedor TEXT PRIMARY KEY, chave TEXT)")
                 conn.commit()
         except Exception as e:
             self.log(f"[SQLITE ERROR] Falha ao iniciar DB: {e}", apenas_terminal=True)
+
+    # --- CRIPTOGRAFIA DAS CHAVES DE API ---
+    def criptografar_texto(self, texto):
+        if not texto: return ""
+        key = self.chave_seguranca
+        cifrado = bytes([c ^ key[i % len(key)] for i, c in enumerate(texto.encode('utf-8'))])
+        return base64.b64encode(cifrado).decode('utf-8')
+
+    def descriptografar_texto(self, texto_cifrado):
+        if not texto_cifrado: return ""
+        try:
+            key = self.chave_seguranca
+            decoded = base64.b64decode(texto_cifrado)
+            return bytes([c ^ key[i % len(key)] for i, c in enumerate(decoded)]).decode('utf-8')
+        except: return ""
+
+    def salvar_api_key(self, provedor, chave):
+        cifrada = self.criptografar_texto(chave)
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("INSERT OR REPLACE INTO api_keys (provedor, chave) VALUES (?, ?)", (provedor, cifrada))
+            conn.commit()
+
+    def obter_api_key(self, provedor):
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                row = conn.cursor().execute("SELECT chave FROM api_keys WHERE provedor = ?", (provedor,)).fetchone()
+                return self.descriptografar_texto(row[0]) if row else ""
+        except: return ""
+    # ----------------------------------------
 
     def obter_cnpj_licenciado(self):
         try:
@@ -200,6 +233,24 @@ class DatabaseManager:
                 conn.commit()
         except Exception as e:
             self.log(f"[SQLITE ERROR] Falha ao salvar item: {e}", apenas_terminal=True)
+
+    def salvar_analise_ia(self, cnpj, ano, seq, analise):
+        try:
+            with sqlite3.connect(self.db_path, timeout=10) as conn:
+                cursor = conn.cursor()
+                cursor.execute("UPDATE editais_itens SET analise_ia = ? WHERE cnpj = ? AND ano = ? AND sequencial = ?", (analise, cnpj, ano, seq))
+                conn.commit()
+        except Exception as e:
+            self.log(f"[DB IA] Erro ao salvar análise no banco: {e}", apenas_terminal=True)
+
+    def carregar_analise_ia(self, cnpj, ano, seq):
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT analise_ia FROM editais_itens WHERE cnpj = ? AND ano = ? AND sequencial = ? AND analise_ia IS NOT NULL LIMIT 1", (cnpj, ano, seq))
+                row = cursor.fetchone()
+                return row[0] if row else None
+        except: return None
 
     def executar_leitura(self, sql, params):
         self.log(f"[SQL EXEC] Query: {sql} | Params: {params}", apenas_terminal=True)
@@ -261,7 +312,7 @@ class BuscadorPNCP(ctk.CTk):
     def __init__(self):
         super().__init__()
 
-        self.versao_local = "9.3.0"
+        self.versao_local = "9.4.0"
         self.title(f"Buscador Multi-Portal de Licitações & Preços - Compras Públicas | Versão {self.versao_local}")
         self.geometry("1180x920")
         
@@ -312,7 +363,7 @@ class BuscadorPNCP(ctk.CTk):
         janela_senha.transient(self)
         janela_senha.grab_set()
 
-        ctk.CTkLabel(janela_senha, text="🛠️ Modo de Suporte\n\nIntroduza a Senha Mestra:", font=("Arial", 12, "bold")).pack(pady=(20, 10))
+        ctk.CTkLabel(janela_senha, text="🛠️ Modo de Suporte\n\nIntroduza a Senha Mestra:", font=("Segoe UI", 12, "bold")).pack(pady=(20, 10))
         ent_senha = ctk.CTkEntry(janela_senha, width=200, show="*")
         ent_senha.pack(pady=5)
         ent_senha.focus()
@@ -372,7 +423,7 @@ class BuscadorPNCP(ctk.CTk):
             janela_aviso.title("A Atualizar")
             janela_aviso.geometry("300x100")
             janela_aviso.attributes('-topmost', True)
-            ctk.CTkLabel(janela_aviso, text="A transferir a nova versão...\nPor favor, aguarde.", font=("Arial", 14, "bold")).pack(expand=True)
+            ctk.CTkLabel(janela_aviso, text="A transferir a nova versão...\nPor favor, aguarde.", font=("Segoe UI", 14, "bold")).pack(expand=True)
             self.update()
 
             caminho_exe_atual = os.path.abspath(sys.argv[0]) 
@@ -423,11 +474,11 @@ class BuscadorPNCP(ctk.CTk):
         self.janela_login.grab_set()
         self.janela_login.protocol("WM_DELETE_WINDOW", sys.exit)
 
-        ctk.CTkLabel(self.janela_login, text="Sistema Protegido\n\nPor favor, informe o CNPJ da sua empresa:", font=("Arial", 14, "bold")).pack(pady=(20, 15))
+        ctk.CTkLabel(self.janela_login, text="Sistema Protegido\n\nPor favor, informe o CNPJ da sua empresa:", font=("Segoe UI", 14, "bold")).pack(pady=(20, 15))
         self.ent_cnpj_login = ctk.CTkEntry(self.janela_login, width=300, placeholder_text="Digite apenas números")
         self.ent_cnpj_login.pack(pady=10)
         self.ent_cnpj_login.bind("<Return>", lambda e: self.confirmar_registro_online())
-        self.btn_ativar = ctk.CTkButton(self.janela_login, text="Validar Online", fg_color="#27ae60", hover_color="#2ecc71", font=("Arial", 12, "bold"), command=self.confirmar_registro_online)
+        self.btn_ativar = ctk.CTkButton(self.janela_login, text="Validar Online", fg_color="#27ae60", hover_color="#2ecc71", font=("Segoe UI", 12, "bold"), command=self.confirmar_registro_online)
         self.btn_ativar.pack(pady=20)
 
     def confirmar_registro_online(self):
@@ -550,9 +601,9 @@ class BuscadorPNCP(ctk.CTk):
         janela_arq.geometry("750x450")
         janela_arq.transient(self)
         if not arquivos:
-            ctk.CTkLabel(janela_arq, text="⚠️ Sem anexos para download.", font=("Arial", 14)).pack(pady=30)
+            ctk.CTkLabel(janela_arq, text="⚠️ Sem anexos para download.", font=("Segoe UI", 14)).pack(pady=30)
             return
-        lbl_info = ctk.CTkLabel(janela_arq, text="Lista de Documentos:", font=("Arial", 12, "bold"))
+        lbl_info = ctk.CTkLabel(janela_arq, text="Lista de Documentos:", font=("Segoe UI", 12, "bold"))
         lbl_info.pack(pady=10, padx=10, anchor="w")
         frame_lista = ctk.CTkScrollableFrame(janela_arq)
         frame_lista.pack(fill="both", expand=True, padx=10, pady=(0, 10))
@@ -560,29 +611,21 @@ class BuscadorPNCP(ctk.CTk):
             frame_item = ctk.CTkFrame(frame_lista, fg_color="#ecf0f1", corner_radius=5)
             frame_item.pack(fill="x", pady=5, padx=2)
             titulo, tipo, url_doc = arq.get("titulo", "S/ Título"), arq.get("tipoDocumentoNome", "Anexo"), arq.get("url", "")
-            ctk.CTkLabel(frame_item, text=f"[{tipo}] {titulo}", font=("Arial", 11, "bold"), text_color="#2c3e50", anchor="w", justify="left", wraplength=550).pack(side="left", padx=10, pady=10, fill="x", expand=True)
+            ctk.CTkLabel(frame_item, text=f"[{tipo}] {titulo}", font=("Segoe UI", 11, "bold"), text_color="#2c3e50", anchor="w", justify="left", wraplength=550).pack(side="left", padx=10, pady=10, fill="x", expand=True)
             if url_doc: ctk.CTkButton(frame_item, text="Baixar", width=100, fg_color="#2980b9", command=lambda u=url_doc: webbrowser.open(u)).pack(side="right", padx=10, pady=10)
 
-    # NOVO MOTOR DE ANÁLISE: VARREDURA PROFUNDA (ITENS + PDF EM MEMÓRIA)
+    # NOVO MOTOR DE ANÁLISE: MULTI-PDF E CACHE NO BANCO
     def abrir_janela_analise(self):
         if not self.item_selecionado_doc: return
         cnpj, ano, seq = self.item_selecionado_doc
         
-        # 1. Feedback imediato na UI (Bloqueia o botão e muda de cor)
-        self.btn_analise.configure(text="⏳ A preparar IA...\n(Aguarde)", state="disabled", fg_color="#e17055")
-        
-        # 2. Envia para uma Thread que vai segurar o tempo ANTES de chamar a IA real
+        self.btn_analise.configure(text="⏳ A preparar IA...", state="disabled", fg_color="#e17055")
         threading.Thread(target=self._iniciar_analise_com_delay, args=(cnpj, ano, seq), daemon=True).start()
 
     def _iniciar_analise_com_delay(self, cnpj, ano, seq):
-        # Timeout de 2.5 segundos em background (não congela o programa)
         self.registrar_log("⏳ A segurar requisição (Timeout de segurança)...", apenas_terminal=True)
-        time.sleep(2.5) 
-        
-        # Atualiza a UI para mostrar que a ação pesada começou
-        self.after(0, lambda: self.btn_analise.configure(text="🧠 Lendo PDFs e\nProcessando IA...", fg_color="#00cec9"))
-        
-        # Chama a função pesada original
+        time.sleep(2.0) 
+        self.after(0, lambda: self.btn_analise.configure(text="🧠 A processar IA...", fg_color="#00cec9"))
         self._analisar_edital_thread(cnpj, ano, seq)
 
     def _analisar_edital_thread(self, cnpj, ano, seq):
@@ -592,11 +635,8 @@ class BuscadorPNCP(ctk.CTk):
             
             res = self._get_com_retentativa(url_compra, params={}, timeout=10, tipo_operacao="busca")
             
-            objeto = ""
-            info_comp = ""
-            amparo = "N/I"
-            julgamento = "N/I"
-            modo_disputa = "N/I"
+            objeto = info_comp = ""
+            amparo = julgamento = modo_disputa = "N/I"
             valor_total = 0.0
 
             if res and res.status_code == 200:
@@ -624,7 +664,7 @@ class BuscadorPNCP(ctk.CTk):
             texto_completo = f"{objeto}\n{info_comp}\n"
             fonte_detalhe = "🌐 Resumo PNCP"
             
-            # ETAPA 2: LISTAR ARQUIVOS E VARREDURA PROFUNDA (DOWNLOAD DO PDF DO EDITAL)
+            # ETAPA 2: LISTAR ARQUIVOS E VARREDURA MULTI-PDF
             self.registrar_log("🤖 Procurando ficheiros e anexos do Edital...")
             url_arquivos = f"https://pncp.gov.br/api/pncp/v1/orgaos/{cnpj}/compras/{ano}/{seq}/arquivos"
             res_arq = self._get_com_retentativa(url_arquivos, params={"pagina":1, "tamanhoPagina":50}, timeout=10, tipo_operacao="busca")
@@ -638,115 +678,164 @@ class BuscadorPNCP(ctk.CTk):
                 elif isinstance(dados_arq, list): arquivos_lista = dados_arq
                     
                 if HAS_PYPDF and arquivos_lista:
-                    url_pdf_alvo = None
+                    self.registrar_log("📄 Lendo múltiplos PDFs...")
+                    pdfs_lidos = 0
                     for arq in arquivos_lista:
                         titulo = (arq.get("titulo", "")).lower()
                         tipo = (arq.get("tipoDocumentoNome", "")).lower()
-                        if "edital" in titulo or "termo de refer" in titulo or "edital" in tipo or "termo" in tipo:
-                            url_pdf_alvo = arq.get("url")
-                            break
-                    
-                    if url_pdf_alvo:
-                        self.registrar_log("📄 PDF Base Encontrado! Lendo o texto para memória RAM...")
-                        try:
-                            res_pdf = self.http_session.get(url_pdf_alvo, timeout=20)
-                            if res_pdf.status_code == 200:
-                                pdf_file = io.BytesIO(res_pdf.content)
-                                leitor = pypdf.PdfReader(pdf_file)
-                                for i in range(min(50, len(leitor.pages))): # Aumentado para 50 páginas
-                                    ext = leitor.pages[i].extract_text()
-                                    if ext: 
-                                        pdf_texto_puro += f"--- PÁGINA {i+1} ---\n" + ext + "\n\n"
-                                texto_completo += "\n" + pdf_texto_puro
-                                fonte_detalhe += " + 📄 Varredura Profunda no PDF"
-                        except Exception as epdf:
-                            self.registrar_log(f"⚠️ Erro ao varrer PDF: {epdf}", apenas_terminal=True)
-                            pdf_texto_puro = "⚠️ Falha ao ler o conteúdo do PDF."
-
-            # =====================================================================
-            # ETAPA 3: ANÁLISE COM IA GENERATIVA (API REST DIRETA + RETRY)
-            # =====================================================================
-            CHAVE_GEMINI = "" # COLOQUE A SUA CHAVE AQUI
-            
-            if CHAVE_GEMINI:
-                self.registrar_log("🧠 Enviando texto para o Gemini 3.8 Flash via API REST...")
-                
-                try:
-                    url_ia = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-lite-latest:generateContent?key={CHAVE_GEMINI}"
-                    
-                    prompt = f"""
-                    Aja como um advogado especialista em Licitações Públicas no Brasil.
-                    Analise o texto do edital fornecido abaixo e extraia os pontos críticos com base nas informações literais encontradas.
-                    Formate a sua resposta em tópicos claros. Use emojis para ilustrar. 
-                    Se uma informação não estiver explícita, responda rigorosamente "Não mencionado no texto extraído".
-                    Não invente dados.
-                    
-                    Por favor, traga exatamente estes tópicos:
-                    - 📦 Objeto Resumido: (Qual é o principal foco da contratação em 2 frases?)
-                    - 📍 Local de Entrega/Execução: 
-                    - ⏳ Prazo de Entrega e Vigência:
-                    - 📦 Regime de Fornecimento: (Único, parcelado, contínuo ou sob demanda?)
-                    - 💸 Prazo e Condição de Pagamento:
-                    - 🧪 Exigência de Amostras:
-                    - 🛡️ Garantia Contratual: (Exige caução ou seguro-garantia?)
-                    - 💰 Qualificação Econômico-Financeira: (Exige balanço patrimonial ou capital mínimo?)
-                    - 🗺️ Vistoria/Visita Técnica:
-                    - 🏢 Participação Exclusiva ou Cotas para ME/EPP:
-                    - 📜 Certificações/Registros Específicos: (ANVISA, INMETRO, CREA, Alvarás, etc.)
-                    - 🤝 Subcontratação: (É permitida?)
-
-                    --- TEXTO DO EDITAL PARA ANÁLISE ---
-                    {texto_completo[:80000]} 
-                    """
-                    
-                    payload = {"contents": [{"parts": [{"text": prompt}]}]}
-                    
-                    # Sistema de insistência automática (Retry Loop)
-                    max_tentativas_ia = 3
-                    resposta_ia = ""
-                    erro_txt = ""
-                    
-                    for tentativa in range(1, max_tentativas_ia + 1):
-                        res_ia = requests.post(url_ia, json=payload, timeout=60)
+                        url_pdf = arq.get("url")
                         
-                        if res_ia.status_code == 200:
-                            dados_ia = res_ia.json()
-                            resposta_ia = dados_ia.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "⚠️ Sem resposta extraída.")
-                            break # Sucesso, sai do loop!
-                            
-                        elif res_ia.status_code in [503, 429]:
-                            # Google sobrecarregado. Espera 4s, depois 8s, depois desiste.
-                            tempo_espera = tentativa * 4
-                            self.registrar_log(f"⚠️ Google sobrecarregado (Erro {res_ia.status_code}). Tentativa {tentativa}/{max_tentativas_ia}. Aguardando {tempo_espera}s...", apenas_terminal=True)
-                            self.after(0, lambda t=tentativa, te=tempo_espera: self.btn_analise.configure(text=f"⚠️ Google ocupado...\nRe-tentando em {te}s (T{t})", fg_color="#e17055"))
-                            time.sleep(tempo_espera)
-                            erro_txt = res_ia.text
-                        else:
-                            erro_txt = res_ia.text
-                            break # Erros definitivos (400, 403, 404), não adianta tentar de novo
-                    
-                    if resposta_ia:
-                        relatorio = f"🧠 ANÁLISE INTELIGENTE COM IA\n"
-                        relatorio += f"📡 FONTES ANALISADAS: {fonte_detalhe}\n"
-                        relatorio += "="*80 + "\n\n"
-                        relatorio += f"1️⃣ INFORMAÇÕES GERAIS E CONTRATUAIS\n"
-                        relatorio += f"• Amparo Legal (Lei): {amparo}\n"
-                        relatorio += f"• Modo de Disputa: {modo_disputa}\n"
-                        relatorio += f"• Critério de Julgamento: {julgamento}\n"
-                        relatorio += f"• Valor Total Estimado Global: {Utils.formatar_moeda(valor_total)}\n\n"
-                        relatorio += "-"*80 + "\n"
-                        relatorio += resposta_ia
-                        relatorio += "\n" + "="*80 + "\n\n"
+                        # Tenta extrair até 4 PDFs relevantes para ter visão geral sem estourar limite da IA
+                        if url_pdf and pdfs_lidos < 4:
+                            if "edital" in titulo or "termo" in titulo or "anexo" in titulo or url_pdf.endswith(".pdf"):
+                                try:
+                                    res_pdf = self.http_session.get(url_pdf, timeout=20)
+                                    if res_pdf.status_code == 200:
+                                        pdf_file = io.BytesIO(res_pdf.content)
+                                        leitor = pypdf.PdfReader(pdf_file)
+                                        
+                                        # Identificador visual para o texto extraído
+                                        pdf_texto_puro += f"\n\n{'='*40}\nDOCUMENTO: {titulo.upper()}\n{'='*40}\n"
+                                        
+                                        # Lê no máximo 30 páginas por PDF para não saturar
+                                        for i in range(min(30, len(leitor.pages))): 
+                                            ext = leitor.pages[i].extract_text()
+                                            if ext: 
+                                                pdf_texto_puro += f"\n--- PÁG {i+1} ---\n" + ext
+                                        pdfs_lidos += 1
+                                except Exception as epdf:
+                                    self.registrar_log(f"⚠️ Erro ao ler PDF {titulo}: {epdf}", apenas_terminal=True)
+                                    
+                    if pdf_texto_puro.strip():
+                        texto_completo += "\n" + pdf_texto_puro
+                        fonte_detalhe += f" + 📄 Leitura de {pdfs_lidos} ficheiro(s) PDF"
                     else:
-                        self.registrar_log(f"[GEMINI ERROR] HTTP {res_ia.status_code}: {erro_txt}", apenas_terminal=True)
-                        relatorio = f"⚠️ ERRO DA API GOOGLE (HTTP {res_ia.status_code}):\nOs servidores da Google estão com tráfego extremo neste momento.\n{erro_txt}"
-                        
-                except Exception as e_ia:
-                    self.registrar_log(f"[GEMINI ERROR] Falha na rede/IA: {e_ia}", apenas_terminal=True)
-                    relatorio = f"⚠️ ERRO AO CONECTAR COM A IA: {e_ia}"
-            else:
-                relatorio = "⚠️ CHAVE DO GEMINI NÃO CONFIGURADA."
+                        pdf_texto_puro = "⚠️ O texto dos PDFs não pôde ser extraído."
+
             # =====================================================================
+            # ETAPA 3: IA GENERATIVA (Dots3 com Fallback no Gemini + Banco de Dados)
+            # =====================================================================
+            analise_salva = self.db.carregar_analise_ia(cnpj, ano, seq)
+            
+            if analise_salva:
+                self.registrar_log("✅ Análise instantânea: Carregada da Base de Dados Local (Sem custos API).")
+                relatorio = analise_salva
+            else:
+                chave_dots = self.db.obter_api_key("DOTS")
+                chave_gemini = self.db.obter_api_key("GEMINI")
+                
+                if not chave_dots and not chave_gemini:
+                    relatorio = "⚠️ NENHUMA CHAVE DE IA CONFIGURADA.\n\nVá ao menu 'Opções' > 'Configurar Chaves de API (IA)' e insira a chave do DOTS ou Gemini."
+                    self.after(0, lambda: self.mostrar_janela_analise(relatorio, pdf_texto_puro, arquivos_lista))
+                    return
+                
+                resposta_ia = ""
+                modelo_usado = ""
+                erro_txt = ""
+
+                prompt = f"""
+                Aja como um advogado especialista em Licitações Públicas no Brasil.
+                Analise o texto do edital (e seus anexos) fornecido abaixo e extraia os pontos críticos com base nas informações literais encontradas.
+                Formate a sua resposta em tópicos claros. Use emojis para ilustrar. 
+                Se uma informação não estiver explícita, responda rigorosamente "Não mencionado no texto extraído".
+                Não invente dados.
+                
+                Por favor, traga exatamente estes tópicos:
+                - 📦 Objeto Resumido: (Qual é o principal foco da contratação em 2 frases?)
+                - 📍 Local de Entrega/Execução: 
+                - ⏳ Prazo de Entrega e Vigência:
+                - 📦 Regime de Fornecimento: (Único, parcelado, contínuo ou sob demanda?)
+                - 💸 Prazo e Condição de Pagamento:
+                - 🧪 Exigência de Amostras:
+                - 🛡️ Garantia Contratual: (Exige caução ou seguro-garantia?)
+                - 💰 Qualificação Econômico-Financeira: (Exige balanço patrimonial ou capital mínimo?)
+                - 🗺️ Vistoria/Visita Técnica:
+                - 🏢 Participação Exclusiva ou Cotas para ME/EPP:
+                - 📜 Certificações/Registros Específicos: (ANVISA, INMETRO, CREA, Alvarás, etc.)
+                - 🤝 Subcontratação: (É permitida?)
+
+                --- TEXTO DO EDITAL E ANEXOS PARA ANÁLISE ---
+                {texto_completo[:100000]} 
+                """
+
+                # 1. TENTA DOTS PRIMEIRO (Dots3-Note Preview)
+                # 1. TENTA DOTS PRIMEIRO (Via OpenRouter)
+                if chave_dots:
+                    # Limpa qualquer espaço oculto ou quebra de linha invisível da base de dados
+                    chave_limpa_dots = chave_dots.strip()
+                    
+                    # Imprime as primeiras letras para termos a certeza que a chave correta foi carregada
+                    self.registrar_log(f"🧠 Iniciando análise via DOTS... (Chave lida: {chave_limpa_dots[:12]}...)")
+                    
+                    try:
+                        url_dots = "https://openrouter.ai/api/v1/chat/completions" 
+                        
+                        payload_dots = {
+                            "model": "dots-studio/dots-3-note-preview:free",
+                            "messages": [{"role": "user", "content": prompt}],
+                            "reasoning": {"enabled": True}
+                        }
+                        
+                        headers_dots = {
+                            "Authorization": f"Bearer {chave_limpa_dots}", 
+                            "Content-Type": "application/json",
+                            "HTTP-Referer": "https://seu-sistema.com", 
+                            "X-Title": "Buscador PNCP"
+                        }
+                        
+                        res_dots = requests.post(url_dots, json=payload_dots, headers=headers_dots, timeout=90)
+                        
+                        if res_dots.status_code == 200:
+                            dados_dots = res_dots.json()
+                            resposta_ia = dados_dots.get("choices", [{}])[0].get("message", {}).get("content", "")
+                            modelo_usado = "Dots-3 Note Preview (OpenRouter - Primário)"
+                        else:
+                            erro_txt += f"• DOTS ({res_dots.status_code}): {res_dots.text}\n"
+                            self.registrar_log(f"⚠️ Falha no DOTS: HTTP {res_dots.status_code}. Saltando para Fallback...", apenas_terminal=True)
+                    except Exception as e:
+                        erro_txt += f"• Erro conexão DOTS: {str(e)}\n"
+                        self.registrar_log(f"⚠️ Erro no DOTS: {e}. Saltando para Fallback...", apenas_terminal=True)
+
+                # 2. SE DOTS FALHOU OU NÃO EXISTE CHAVE, TENTA GOOGLE GEMINI (Fallback)
+                if not resposta_ia and chave_gemini:
+                    self.registrar_log("🧠 Iniciando análise via Google Gemini (Fallback)...")
+                    try:
+                        url_gemini = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-lite-latest:generateContent?key={chave_gemini}"
+                        payload_gemini = {"contents": [{"parts": [{"text": prompt}]}]}
+                        
+                        for tentativa in range(1, 4):
+                            res_gemini = requests.post(url_gemini, json=payload_gemini, timeout=60)
+                            
+                            if res_gemini.status_code == 200:
+                                resposta_ia = res_gemini.json().get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+                                modelo_usado = "Google Gemini (Secundário/Fallback)"
+                                break 
+                                
+                            elif res_gemini.status_code in [503, 429]:
+                                time.sleep(tentativa * 4)
+                            else:
+                                erro_txt += f"• Gemini ({res_gemini.status_code}): {res_gemini.text}\n"
+                                break 
+                    except Exception as e:
+                        erro_txt += f"• Erro conexão Gemini: {str(e)}\n"
+                
+                # 3. COMPILA O RESULTADO
+                if resposta_ia:
+                    relatorio = f"🧠 ANÁLISE INTELIGENTE | Processado IA\n"
+                    relatorio += f"📡 FONTES ANALISADAS: {fonte_detalhe}\n"
+                    relatorio += "="*80 + "\n\n"
+                    relatorio += f"1️⃣ INFORMAÇÕES GERAIS E CONTRATUAIS\n"
+                    relatorio += f"• Amparo Legal (Lei): {amparo}\n"
+                    relatorio += f"• Modo de Disputa: {modo_disputa}\n"
+                    relatorio += f"• Critério de Julgamento: {julgamento}\n"
+                    relatorio += f"• Valor Total Estimado Global: {Utils.formatar_moeda(valor_total)}\n\n"
+                    relatorio += "-"*80 + "\n"
+                    relatorio += resposta_ia
+                    relatorio += "\n" + "="*80 + "\n\n"
+                    
+                    self.db.salvar_analise_ia(cnpj, ano, seq, relatorio)
+                else:
+                    relatorio = f"⚠️ FALHA TOTAL NOS SERVIDORES DE IA.\n\nTentativas falhadas:\n{erro_txt}"
             # =====================================================================
             
             self.after(0, lambda: self.mostrar_janela_analise(relatorio, pdf_texto_puro, arquivos_lista))
@@ -756,45 +845,38 @@ class BuscadorPNCP(ctk.CTk):
             self.after(0, lambda erro=str(e): messagebox.showerror("Erro", f"Erro na análise: {erro}"))
         finally:
             self.after(0, lambda: self.btn_analise.configure(
-                text="✨ Analisar com IA\n(Leitura Profunda)", 
+                text="✨ Analisar com IA", 
                 state="normal", 
                 fg_color=self.cor_ia_normal
             ))
 
     def mostrar_janela_analise(self, relatorio_texto, texto_pdf, arquivos):
         janela_an = ctk.CTkToplevel(self)
-        janela_an.title("Painel de Análise e Documentos Oficiais do Edital")
+        janela_an.title("Painel de Análise e Documentos Oficiais")
         janela_an.geometry("1000x750")
         janela_an.transient(self)
         
-        # Criação do Sistema de Abas (Tabs)
         tabview = ctk.CTkTabview(janela_an)
         tabview.pack(fill="both", expand=True, padx=10, pady=10)
 
-        tab_resumo = tabview.add("📊 Resumo Inteligente (Radar)")
-        tab_texto_pdf = tabview.add("📄 Texto Extraído do PDF")
+        tab_resumo = tabview.add("📊 Resumo Inteligente (IA)")
+        tab_texto_pdf = tabview.add("📄 Texto Extraído dos PDFs")
         tab_arquivos = tabview.add("📂 Listagem de Arquivos/Download")
 
-        # --- ABA 1: RESUMO DO RADAR HEURÍSTICO ---
-        txt_resumo = ctk.CTkTextbox(tab_resumo, font=("Consolas", 12), fg_color="#fdfdfd", text_color="#2c3e50")
+        txt_resumo = ctk.CTkTextbox(tab_resumo, font=("Consolas", 13), fg_color="#fdfdfd", text_color="#2c3e50")
         txt_resumo.pack(fill="both", expand=True, padx=5, pady=5)
         txt_resumo.insert("end", relatorio_texto)
         txt_resumo.configure(state="disabled")
 
-        # --- ABA 2: TEXTO PURO DO PDF LIDO NA ÍNTEGRA ---
         txt_pdf = ctk.CTkTextbox(tab_texto_pdf, font=("Consolas", 11), fg_color="#fdfdfd", text_color="#34495e")
         txt_pdf.pack(fill="both", expand=True, padx=5, pady=5)
-        if texto_pdf.strip():
-            txt_pdf.insert("end", texto_pdf)
-        else:
-            txt_pdf.insert("end", "⚠️ O texto do PDF principal não pôde ser extraído.\nMotivos comuns:\n- O edital está bloqueado/protegido com senha.\n- O edital é composto apenas por imagens escaneadas (não tem texto puro).\n- Nenhum PDF foi identificado na lista de anexos.")
+        txt_pdf.insert("end", texto_pdf)
         txt_pdf.configure(state="disabled")
 
-        # --- ABA 3: ARQUIVOS E BOTÕES DE DOWNLOAD ---
         if not arquivos:
-            ctk.CTkLabel(tab_arquivos, text="⚠️ Nenhum anexo ou documento foi disponibilizado no sistema do PNCP para este edital.", font=("Arial", 14)).pack(pady=30)
+            ctk.CTkLabel(tab_arquivos, text="⚠️ Nenhum anexo foi disponibilizado no sistema do PNCP.", font=("Segoe UI", 14)).pack(pady=30)
         else:
-            lbl_info = ctk.CTkLabel(tab_arquivos, text="Documentos originais associados à contratação:", font=("Arial", 12, "bold"))
+            lbl_info = ctk.CTkLabel(tab_arquivos, text="Documentos originais associados à contratação:", font=("Segoe UI", 12, "bold"))
             lbl_info.pack(pady=10, padx=10, anchor="w")
             
             frame_lista = ctk.CTkScrollableFrame(tab_arquivos)
@@ -808,11 +890,41 @@ class BuscadorPNCP(ctk.CTk):
                 tipo = arq.get("tipoDocumentoNome", "Anexo")
                 url_doc = arq.get("url", "")
                 
-                ctk.CTkLabel(frame_item, text=f"[{tipo}]\n{titulo}", font=("Arial", 11, "bold"), text_color="#2c3e50", anchor="w", justify="left", wraplength=700).pack(side="left", padx=10, pady=10, fill="x", expand=True)
-                
+                ctk.CTkLabel(frame_item, text=f"[{tipo}]\n{titulo}", font=("Segoe UI", 11, "bold"), text_color="#2c3e50", anchor="w", justify="left", wraplength=700).pack(side="left", padx=10, pady=10, fill="x", expand=True)
                 if url_doc: 
-                    ctk.CTkButton(frame_item, text="📥 Abrir PDF / Download", width=140, fg_color="#2980b9", hover_color="#1a5276", font=("Arial", 11, "bold"), command=lambda u=url_doc: webbrowser.open(u)).pack(side="right", padx=10, pady=10)
+                    ctk.CTkButton(frame_item, text="📥 Abrir / Download", width=140, fg_color="#2980b9", hover_color="#1a5276", font=("Segoe UI", 11, "bold"), command=lambda u=url_doc: webbrowser.open(u)).pack(side="right", padx=10, pady=10)
     
+    # ---------------------------------------------------------
+    # MENU DE CONFIGURAÇÃO DE CHAVES DE API
+    # ---------------------------------------------------------
+    def abrir_janela_chaves_api(self):
+        janela_keys = ctk.CTkToplevel(self)
+        janela_keys.title("Configuração de IA (Chaves de API)")
+        janela_keys.geometry("450x320")
+        janela_keys.transient(self)
+        janela_keys.grab_set()
+
+        ctk.CTkLabel(janela_keys, text="🔑 Chaves de Inteligência Artificial", font=("Segoe UI", 14, "bold")).pack(pady=(20, 10))
+        ctk.CTkLabel(janela_keys, text="Estas chaves são gravadas localmente e criptografadas.", font=("Segoe UI", 10, "italic"), text_color="gray").pack(pady=(0, 15))
+
+        ctk.CTkLabel(janela_keys, text="Chave DOTS (Modelo: Dots3-Note Preview):", font=("Segoe UI", 12, "bold")).pack(anchor="w", padx=20)
+        ent_dots = ctk.CTkEntry(janela_keys, width=400, show="*")
+        ent_dots.pack(padx=20, pady=5)
+        ent_dots.insert(0, self.db.obter_api_key("DOTS"))
+
+        ctk.CTkLabel(janela_keys, text="Chave GOOGLE GEMINI (Modelo: Secundário/Fallback):", font=("Segoe UI", 12, "bold")).pack(anchor="w", padx=20, pady=(15,0))
+        ent_gemini = ctk.CTkEntry(janela_keys, width=400, show="*")
+        ent_gemini.pack(padx=20, pady=5)
+        ent_gemini.insert(0, self.db.obter_api_key("GEMINI"))
+
+        def salvar_chaves():
+            self.db.salvar_api_key("DOTS", ent_dots.get().strip())
+            self.db.salvar_api_key("GEMINI", ent_gemini.get().strip())
+            messagebox.showinfo("Sucesso", "As Chaves de API foram criptografadas e guardadas com segurança no seu dispositivo!")
+            janela_keys.destroy()
+
+        ctk.CTkButton(janela_keys, text="💾 Gravar e Encriptar", fg_color="#27ae60", hover_color="#2ecc71", command=salvar_chaves).pack(pady=20)
+
     # ---------------------------------------------------------
     # UI COMPLETA (Interface Gráfica e Menus)
     # ---------------------------------------------------------
@@ -849,7 +961,10 @@ class BuscadorPNCP(ctk.CTk):
         self.menubar = tk.Menu(self)
         self.menu_opcoes = tk.Menu(self.menubar, tearoff=0)
         self.menu_opcoes.add_command(label="Configurar Colunas da Tabela", command=self.abrir_menu_configuracao)
+        self.menu_opcoes.add_separator()
+        self.menu_opcoes.add_command(label="Configurar Chaves de API (IA)", command=self.abrir_janela_chaves_api)
         self.menubar.add_cascade(label="Opções", menu=self.menu_opcoes)
+        
         self.menu_sync = tk.Menu(self.menubar, tearoff=0)
         self.menu_sync.add_command(label="Sincronizar Banco de Dados (API)", command=self.abrir_janela_carga)
         self.menu_sync.add_separator()
@@ -863,7 +978,7 @@ class BuscadorPNCP(ctk.CTk):
         janela_config.geometry("380x350")
         janela_config.transient(self) 
         janela_config.grab_set() 
-        lbl_titulo = ctk.CTkLabel(janela_config, text="Selecione as colunas a apresentar:", font=("Arial", 12, "bold"))
+        lbl_titulo = ctk.CTkLabel(janela_config, text="Selecione as colunas a apresentar:", font=("Segoe UI", 12, "bold"))
         lbl_titulo.pack(pady=(15, 10))
         ctk.CTkCheckBox(janela_config, text="Valor Unitário Estimado", variable=self.config_precos["vlr_unit_est"]).pack(anchor="w", padx=40, pady=5)
         ctk.CTkCheckBox(janela_config, text="Valor Total Estimado", variable=self.config_precos["vlr_total_est"]).pack(anchor="w", padx=40, pady=5)
@@ -894,7 +1009,7 @@ class BuscadorPNCP(ctk.CTk):
         janela.transient(self) 
         janela.grab_set() 
 
-        lbl_titulo = ctk.CTkLabel(janela, text="Defina os Filtros para Descarregar os Dados:", font=("Arial", 14, "bold"))
+        lbl_titulo = ctk.CTkLabel(janela, text="Defina os Filtros para Descarregar os Dados:", font=("Segoe UI", 14, "bold"))
         lbl_titulo.pack(pady=(15, 10))
         frame_filtros = ctk.CTkFrame(janela, fg_color="transparent")
         frame_filtros.pack(fill="x", padx=20, pady=5)
@@ -942,7 +1057,7 @@ class BuscadorPNCP(ctk.CTk):
         frame_scroll_portais = ctk.CTkScrollableFrame(janela, height=150)
         frame_scroll_portais.pack(fill="x", padx=20, pady=5)
 
-        ctk.CTkCheckBox(frame_scroll_portais, text="Todos os Portais", variable=vars_portais_carga["Todos"], command=_chk_todos_click, font=("Arial", 12, "bold")).pack(anchor="w", pady=5)
+        ctk.CTkCheckBox(frame_scroll_portais, text="Todos os Portais", variable=vars_portais_carga["Todos"], command=_chk_todos_click, font=("Segoe UI", 12, "bold")).pack(anchor="w", pady=5)
         ctk.CTkFrame(frame_scroll_portais, height=2, fg_color="gray").pack(fill="x", pady=2)
         for portal in self.lista_portais_comuns: ctk.CTkCheckBox(frame_scroll_portais, text=portal, variable=vars_portais_carga[portal], command=_chk_ind_click).pack(anchor="w", padx=15, pady=2)
 
@@ -961,7 +1076,7 @@ class BuscadorPNCP(ctk.CTk):
             threading.Thread(target=self._executar_carga_base_thread, args=(d_ini, d_fim, cat_id, mod_id, uf, p_sel), daemon=True).start()
             janela.destroy()
 
-        btn_iniciar = ctk.CTkButton(janela, text="🚀 Iniciar Sincronização em Segundo Plano", fg_color="#8e44ad", hover_color="#732d91", font=("Arial", 12, "bold"), command=processar_inicio)
+        btn_iniciar = ctk.CTkButton(janela, text="🚀 Iniciar Sincronização em Segundo Plano", fg_color="#8e44ad", hover_color="#732d91", font=("Segoe UI", 12, "bold"), command=processar_inicio)
         btn_iniciar.pack(pady=20)
 
     def parar_carga_background(self):
@@ -975,10 +1090,13 @@ class BuscadorPNCP(ctk.CTk):
         self.registrar_log("🛑 Atualização em massa cancelada instantaneamente pelo utilizador.")
 
     def criar_interface(self):
+        # 🎨 MELHORIA DE DESIGN WINDOWS XP -> SISTEMA MODERNO FLAT
         style = ttk.Style()
-        style.theme_use("default")
-        style.configure("Treeview", rowheight=30, font=("Arial", 10))
-        style.configure("Treeview.Heading", font=("Arial", 10, "bold"), background="#dcdde1", foreground="#2f3640")
+        style.theme_use("clam") # Remove visual antigo 3D
+        style.configure("Treeview", rowheight=35, font=("Segoe UI", 10), borderwidth=0, background="#ffffff", fieldbackground="#ffffff", foreground="#2f3640")
+        style.configure("Treeview.Heading", font=("Segoe UI", 10, "bold"), background="#f1f2f6", foreground="#2c3e50", borderwidth=0, padding=4)
+        style.map("Treeview", background=[('selected', '#e0f7fa')], foreground=[('selected', '#000000')]) # Seleção moderna
+        style.map("Treeview.Heading", background=[('active', '#dcdde1')])
 
         self.tabview = ctk.CTkTabview(self)
         self.tabview.pack(fill="both", expand=True, padx=10, pady=5)
@@ -989,7 +1107,7 @@ class BuscadorPNCP(ctk.CTk):
         self.frame_busca = ctk.CTkFrame(self.tab_pesquisa, fg_color="transparent")
         self.frame_busca.pack(fill="x", padx=10, pady=5)
 
-        self.lbl_termo = ctk.CTkLabel(self.frame_busca, text="Produto/Serviço (Termo de busca):", font=("Arial", 12, "bold"))
+        self.lbl_termo = ctk.CTkLabel(self.frame_busca, text="Produto/Serviço (Termo de busca):", font=("Segoe UI", 12, "bold"))
         self.lbl_termo.grid(row=0, column=0, sticky="w", padx=5, pady=5)
 
         self.ent_termo = ctk.CTkEntry(self.frame_busca, width=350, placeholder_text="Deixe vazio para extrair todo o Edital")
@@ -1002,7 +1120,7 @@ class BuscadorPNCP(ctk.CTk):
         self.combo_alvo.set("Todos")
         self.combo_alvo.grid(row=0, column=4, sticky="w", padx=5, pady=5)
 
-        self.btn_buscar = ctk.CTkButton(self.frame_busca, text="🔍 Pesquisar", command=self.iniciar_busca, font=("Arial", 12, "bold"))
+        self.btn_buscar = ctk.CTkButton(self.frame_busca, text="🔍 Pesquisar", command=self.iniciar_busca, font=("Segoe UI", 12, "bold"))
         self.btn_buscar.grid(row=0, column=5, padx=10, pady=5)
         self.default_btn_buscar_fg = self.btn_buscar.cget("fg_color")
         self.default_btn_buscar_hover = self.btn_buscar.cget("hover_color")
@@ -1064,18 +1182,33 @@ class BuscadorPNCP(ctk.CTk):
         self.ent_uasg.grid(row=3, column=5, sticky="w", padx=5, pady=5)
         self.ent_uasg.bind("<Return>", lambda e: self.iniciar_busca())
 
-        self.chk_base_local = ctk.CTkCheckBox(self.frame_busca, text="💾 Buscar apenas na Base Local (Obrigatório durante a Sincronização)", font=("Arial", 11, "bold"))
+        self.chk_base_local = ctk.CTkCheckBox(self.frame_busca, text="💾 Buscar apenas na Base Local (Obrigatório durante a Sincronização)", font=("Segoe UI", 11, "bold"))
         self.chk_base_local.grid(row=4, column=0, columnspan=6, sticky="w", padx=5, pady=5)
 
         self.frame_head_tabela = ctk.CTkFrame(self.tab_pesquisa, fg_color="transparent")
         self.frame_head_tabela.pack(fill="x", padx=10, pady=(15, 2))
-        self.lbl_titulo_tabela = ctk.CTkLabel(self.frame_head_tabela, text="Resultados da Pesquisa / Sincronização (Duplo clique para abrir edital no navegador):", font=("Arial", 12, "bold"))
+        self.lbl_titulo_tabela = ctk.CTkLabel(self.frame_head_tabela, text="Resultados da Pesquisa / Sincronização (Duplo clique abre online):", font=("Segoe UI", 12, "bold"))
         self.lbl_titulo_tabela.pack(side="left", padx=5)
-        self.lbl_status = ctk.CTkLabel(self.frame_head_tabela, text="Pronto para buscar.", text_color="#2ecc71", font=("Arial", 11, "italic"))
+        self.lbl_status = ctk.CTkLabel(self.frame_head_tabela, text="Pronto para buscar.", text_color="#2ecc71", font=("Segoe UI", 11, "italic"))
         self.lbl_status.pack(side="left", padx=25)
+        
+        # Botões de Ação no Topo
         self.btn_exportar = ctk.CTkButton(self.frame_head_tabela, text="📊 Exportar Excel", state="disabled", fg_color="#27ae60", width=130, command=self.exportar_excel)
         self.btn_exportar.pack(side="right", padx=5)
 
+        self.cor_ia_normal = "#6c5ce7" 
+        self.cor_ia_hover = "#a29bfe"  
+        self.btn_analise = ctk.CTkButton(
+            self.frame_head_tabela, 
+            text="✨ Analisar com IA", 
+            width=140, 
+            fg_color=self.cor_ia_normal, hover_color=self.cor_ia_hover, 
+            state="disabled", font=("Segoe UI", 12, "bold"), 
+            command=self.abrir_janela_analise
+        )
+        self.btn_analise.pack(side="right", padx=(5, 5))
+
+        # Tabela Modernizada
         self.frame_tabela = ctk.CTkFrame(self.tab_pesquisa)
         self.frame_tabela.pack(fill="both", expand=True, padx=10, pady=2)
 
@@ -1100,7 +1233,6 @@ class BuscadorPNCP(ctk.CTk):
         self.tree.heading("media_orgao", text="Média Órgão (12m)")
         self.tree.heading("media_geral", text="Média Geral (12m)")
                 
-
         self.tree.tag_configure('aderente', background='#d4efdf')
 
         for col in colunas:
@@ -1136,30 +1268,16 @@ class BuscadorPNCP(ctk.CTk):
         self.frame_detalhes = ctk.CTkFrame(self.tab_pesquisa, fg_color="transparent")
         self.frame_detalhes.pack(fill="x", padx=10, pady=(2, 10))
 
-        self.txt_detalhes = ctk.CTkTextbox(self.frame_detalhes, height=100, font=("Arial", 12), text_color="#2c3e50")
+        self.txt_detalhes = ctk.CTkTextbox(self.frame_detalhes, height=100, font=("Segoe UI", 12), text_color="#2c3e50")
         self.txt_detalhes.pack(side="left", fill="both", expand=True, padx=(0, 5))
         self.txt_detalhes.insert("end", "Selecione um item na tabela acima para visualizar a descrição multilinha aqui.")
         self.txt_detalhes.configure(state="disabled")
 
         self.btn_arquivos = ctk.CTkButton(
             self.frame_detalhes, text="📂 Ver Arquivos\n(PDF/Anexos)", width=140, height=100,
-            fg_color="#d35400", hover_color="#e67e22", state="disabled", font=("Arial", 12, "bold"), command=self.abrir_janela_arquivos
+            fg_color="#d35400", hover_color="#e67e22", state="disabled", font=("Segoe UI", 12, "bold"), command=self.abrir_janela_arquivos
         )
         self.btn_arquivos.pack(side="right", padx=(5, 0))
-
-        # Botão com visual moderno estilo "Inteligência Artificial"
-        self.cor_ia_normal = "#6c5ce7" # Roxo moderno
-        self.cor_ia_hover = "#a29bfe"  # Roxo claro
-        
-        self.btn_analise = ctk.CTkButton(
-            self.frame_detalhes, 
-            text="✨ Analisar com IA\n(Leitura Profunda)", 
-            width=160, height=100,
-            fg_color=self.cor_ia_normal, hover_color=self.cor_ia_hover, 
-            state="disabled", font=("Arial", 12, "bold"), 
-            command=self.abrir_janela_analise
-        )
-        self.btn_analise.pack(side="right", padx=(5, 0))
 
         self.tree.bind("<<TreeviewSelect>>", self._ao_selecionar_tabela)
         self.tree.bind("<Double-1>", self._ao_duplo_clique_tabela)
@@ -1213,11 +1331,11 @@ class BuscadorPNCP(ctk.CTk):
         janela_portais.geometry("380x480")
         janela_portais.transient(self) 
         janela_portais.grab_set() 
-        lbl_titulo = ctk.CTkLabel(janela_portais, text="Selecione os portais para a busca:", font=("Arial", 12, "bold"))
+        lbl_titulo = ctk.CTkLabel(janela_portais, text="Selecione os portais para a busca:", font=("Segoe UI", 12, "bold"))
         lbl_titulo.pack(pady=(15, 5))
         frame_scroll = ctk.CTkScrollableFrame(janela_portais)
         frame_scroll.pack(fill="both", expand=True, padx=15, pady=5)
-        ctk.CTkCheckBox(frame_scroll, text="Qualquer Portal (Todos)", font=("Arial", 12, "bold"), variable=self.vars_portais["Todos"], command=self._on_chk_todos_portais_click).pack(anchor="w", padx=5, pady=10)
+        ctk.CTkCheckBox(frame_scroll, text="Qualquer Portal (Todos)", font=("Segoe UI", 12, "bold"), variable=self.vars_portais["Todos"], command=self._on_chk_todos_portais_click).pack(anchor="w", padx=5, pady=10)
         ctk.CTkFrame(frame_scroll, height=2, fg_color="gray").pack(fill="x", pady=5)
         for portal in self.lista_portais_comuns: ctk.CTkCheckBox(frame_scroll, text=portal, variable=self.vars_portais[portal], command=self._on_chk_portal_click).pack(anchor="w", padx=20, pady=4)
         ctk.CTkButton(janela_portais, text="Confirmar Filtro", command=janela_portais.destroy).pack(pady=15)
