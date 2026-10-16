@@ -14,11 +14,19 @@ import uuid
 import traceback
 import platform
 import re
+import io
 import customtkinter as ctk
 import requests
 import hmac
 import hashlib
 import base64
+
+# Importação da biblioteca de leitura de PDFs (Fallback se não instalada)
+try:
+    import pypdf
+    HAS_PYPDF = True
+except ImportError:
+    HAS_PYPDF = False
 
 # Configuração visual do CustomTkinter
 ctk.set_appearance_mode("Light")
@@ -246,13 +254,13 @@ class DatabaseManager:
 
 
 # ==============================================================================
-# 4. CLASSE PRINCIPAL DO APP (Lógica de Rede e Interface Gráfica)
+# 4. CLASSE PRINCIPAL DO APP
 # ==============================================================================
 class BuscadorPNCP(ctk.CTk):
     def __init__(self):
         super().__init__()
 
-        self.versao_local = "9.2.1"
+        self.versao_local = "9.3.0"
         self.title(f"Buscador Multi-Portal de Licitações & Preços - Compras Públicas | Versão {self.versao_local}")
         self.geometry("1180x920")
         
@@ -322,7 +330,7 @@ class BuscadorPNCP(ctk.CTk):
         ctk.CTkButton(janela_senha, text="Aceder", command=validar, fg_color="#c0392b", hover_color="#e74c3c").pack(pady=15)
 
     # ---------------------------------------------------------
-    # ARRANQUE E VERIFICAÇÕES DE REDE (Auth e Updates)
+    # ARRANQUE E VERIFICAÇÕES DE REDE
     # ---------------------------------------------------------
     def _rotina_de_arranque(self):
         if not self.verificar_versao_inicial(): return 
@@ -452,7 +460,7 @@ class BuscadorPNCP(ctk.CTk):
         self.registrar_log(f"[HTTP GET] Iniciando request -> {url}", apenas_terminal=True)
         self.registrar_log(f"           [PARAMS] {params}", apenas_terminal=True)
         
-        time.sleep(0.15) # Pacing Anti-429
+        time.sleep(0.15) 
         
         for tentativa in range(1, max_tentativas + 1):
             if (self.cancelar_busca if tipo_operacao == "busca" else self.cancelar_carga): return None
@@ -468,7 +476,6 @@ class BuscadorPNCP(ctk.CTk):
                         time.sleep(0.1)
                     continue 
                 
-                # --- LOG MELHORADO: MOSTRANDO STATUS E CORPO DA RESPOSTA ---
                 corpo_resumo = res.text[:250].replace('\n', ' ') if res.text else "Sem conteúdo"
                 self.registrar_log(f"[HTTP {res.status_code}] <- Retorno: {corpo_resumo} | Tamanho: {len(res.content)} bytes", apenas_terminal=True)
                 
@@ -523,10 +530,9 @@ class BuscadorPNCP(ctk.CTk):
         if not self.item_selecionado_doc: return
         cnpj, ano, seq = self.item_selecionado_doc
         self.btn_arquivos.configure(text="Aguarde...", state="disabled")
-        
-        # REVERTIDO PARA /api/pncp/v1/ PARA OS ARQUIVOS (Onde eles residem de facto)
         url_arquivos = f"https://pncp.gov.br/api/pncp/v1/orgaos/{cnpj}/compras/{ano}/{seq}/arquivos"
         threading.Thread(target=self._buscar_arquivos_thread, args=(url_arquivos,), daemon=True).start()
+
     def _buscar_arquivos_thread(self, url):
         try:
             res = self._get_com_retentativa(url, params={"pagina": 1, "tamanhoPagina": 100}, timeout=15, tipo_operacao="busca")
@@ -556,15 +562,16 @@ class BuscadorPNCP(ctk.CTk):
             ctk.CTkLabel(frame_item, text=f"[{tipo}] {titulo}", font=("Arial", 11, "bold"), text_color="#2c3e50", anchor="w", justify="left", wraplength=550).pack(side="left", padx=10, pady=10, fill="x", expand=True)
             if url_doc: ctk.CTkButton(frame_item, text="Baixar", width=100, fg_color="#2980b9", command=lambda u=url_doc: webbrowser.open(u)).pack(side="right", padx=10, pady=10)
 
+    # NOVO MOTOR DE ANÁLISE: VARREDURA PROFUNDA (ITENS + PDF EM MEMÓRIA)
     def abrir_janela_analise(self):
         if not self.item_selecionado_doc: return
         cnpj, ano, seq = self.item_selecionado_doc
-        self.btn_analise.configure(text="A processar...", state="disabled")
+        self.btn_analise.configure(text="A processar\n(Lendo PDFs...)", state="disabled")
         threading.Thread(target=self._analisar_edital_thread, args=(cnpj, ano, seq), daemon=True).start()
 
     def _analisar_edital_thread(self, cnpj, ano, seq):
         try:
-            self.registrar_log("🤖 A transferir e analisar Edital completo...")
+            self.registrar_log("🤖 A transferir Resumo Base do PNCP...")
             url_compra = f"https://pncp.gov.br/api/consulta/v1/orgaos/{cnpj}/compras/{ano}/{seq}"
             
             res = self._get_com_retentativa(url_compra, params={}, timeout=10, tipo_operacao="busca")
@@ -575,7 +582,6 @@ class BuscadorPNCP(ctk.CTk):
             julgamento = "N/I"
             modo_disputa = "N/I"
             valor_total = 0.0
-            fonte = "🌐 Online (API do PNCP Web)"
 
             if res and res.status_code == 200:
                 dados = res.json()
@@ -586,58 +592,131 @@ class BuscadorPNCP(ctk.CTk):
                 modo_disputa = dados.get("modoDisputa", {}).get("nome", "Não informado")
                 valor_total = dados.get("valorTotalEstimado", 0.0)
             else:
-                self.registrar_log("⚠️ API do Governo bloqueou acesso direto. Ativando Modo Offline...")
-                fonte = "💾 Offline (Base de Dados Local - Modo de Segurança)"
-                
-                linhas = self.db.executar_leitura(
-                    "SELECT objeto_contrato, vlr_total_est, modalidade_nome FROM editais_itens WHERE cnpj=? AND ano=? AND sequencial=? LIMIT 1",
-                    (cnpj, ano, seq)
-                )
-                
+                self.registrar_log("⚠️ Fallback ativado. Usando BD Local...")
+                linhas = self.db.executar_leitura("SELECT objeto_contrato, vlr_total_est, modalidade_nome FROM editais_itens WHERE cnpj=? AND ano=? AND sequencial=? LIMIT 1", (cnpj, ano, seq))
                 if linhas:
                     objeto = linhas[0][0]
-                    info_comp = "⚠️ (Informações complementares ocultadas pelo servidor. Leia o objeto acima)."
                     modo_disputa = linhas[0][2]
                     try:
                         v_str = str(linhas[0][1]).replace("R$ ", "").replace(".", "").replace(",", ".")
                         valor_total = float(v_str) if v_str != "Não informado" else 0.0
-                    except:
-                        valor_total = 0.0
+                    except: valor_total = 0.0
                 else:
-                    self.after(0, lambda: messagebox.showinfo("Análise", "Não foi possível resgatar os dados do edital."))
+                    self.after(0, lambda: messagebox.showinfo("Análise", "Dados indisponíveis."))
                     return
+
+            texto_completo = f"{objeto} {info_comp} ".lower()
+            fonte_detalhe = "🌐 Resumo PNCP"
+            req_meepp = "⚖️ Ampla Concorrência (Não detectado no Resumo)"
+
+            # ETAPA 2: BUSCAR ITENS PARA VERIFICAR ME/EPP OFICIALMENTE
+            self.registrar_log("🤖 A verificar Itens e Cotas ME/EPP...")
+            url_itens = f"https://pncp.gov.br/api/pncp/v1/orgaos/{cnpj}/compras/{ano}/{seq}/itens"
+            res_itens = self._get_com_retentativa(url_itens, params={"pagina":1, "tamanhoPagina":50}, timeout=10, tipo_operacao="busca")
+            tem_me_epp = False
             
-            texto_completo = f"{objeto} {info_comp}".lower()
+            if res_itens and res_itens.status_code == 200:
+                itens_data = res_itens.json()
+                if isinstance(itens_data, dict): itens_data = itens_data.get("data", [])
+                elif not isinstance(itens_data, list): itens_data = []
+                
+                for it in itens_data:
+                    # Captura critério se não havia na raiz
+                    if it.get("criterioJulgamento", {}).get("nome") and julgamento == "N/I":
+                        julgamento = it.get("criterioJulgamento", {}).get("nome")
+                    
+                    # Verificação nativa da API se há restrição para pequena empresa
+                    if it.get("indicadorMeEpp") == True:
+                        tem_me_epp = True
+                        
+                    texto_completo += " " + (it.get("descricao", "") or "").lower()
+
+            if tem_me_epp:
+                req_meepp = "🎯 SIM (Foi detetado Item com Cota Exclusiva ME/EPP na API)"
+
+            # ETAPA 3: LISTAR ARQUIVOS E VARREDURA PROFUNDA (DOWNLOAD DO PDF DO EDITAL)
+            self.registrar_log("🤖 Procurando ficheiros e anexos do Edital...")
+            url_arquivos = f"https://pncp.gov.br/api/pncp/v1/orgaos/{cnpj}/compras/{ano}/{seq}/arquivos"
+            res_arq = self._get_com_retentativa(url_arquivos, params={"pagina":1, "tamanhoPagina":50}, timeout=10, tipo_operacao="busca")
             
-            # --- INTELIGÊNCIA HEURÍSTICA: BUROCRACIA E EXIGÊNCIAS ---
+            arquivos_lista = []
+            pdf_texto_puro = ""
+
+            if res_arq and res_arq.status_code == 200:
+                dados_arq = res_arq.json()
+                
+                if isinstance(dados_arq, dict): arquivos_lista = dados_arq.get("data", [])
+                elif isinstance(dados_arq, list): arquivos_lista = dados_arq
+                    
+                if HAS_PYPDF and arquivos_lista:
+                    url_pdf_alvo = None
+                    
+                    # Procura pelo Edital ou Termo de Referência principal
+                    for arq in arquivos_lista:
+                        titulo = (arq.get("titulo", "")).lower()
+                        tipo = (arq.get("tipoDocumentoNome", "")).lower()
+                        if "edital" in titulo or "termo de refer" in titulo or "edital" in tipo or "termo" in tipo:
+                            url_pdf_alvo = arq.get("url")
+                            break
+                    
+                    if url_pdf_alvo:
+                        self.registrar_log("📄 PDF Base Encontrado! Lendo o texto para memória RAM...")
+                        try:
+                            res_pdf = self.http_session.get(url_pdf_alvo, timeout=20)
+                            if res_pdf.status_code == 200:
+                                pdf_file = io.BytesIO(res_pdf.content)
+                                leitor = pypdf.PdfReader(pdf_file)
+                                # Lê as primeiras 40 páginas (regras do edital)
+                                for i in range(min(40, len(leitor.pages))):
+                                    ext = leitor.pages[i].extract_text()
+                                    if ext: 
+                                        pdf_texto_puro += f"--- PÁGINA {i+1} ---\n" + ext + "\n\n"
+                                texto_completo += " " + pdf_texto_puro.lower()
+                                fonte_detalhe += " + 📄 Varredura Profunda no PDF"
+                        except Exception as epdf:
+                            self.registrar_log(f"⚠️ Erro ao varrer PDF: {epdf}", apenas_terminal=True)
+                            pdf_texto_puro = "⚠️ Falha ao ler o conteúdo do PDF. O arquivo pode estar corrompido ou protegido."
+                elif not HAS_PYPDF:
+                    self.registrar_log("⚠️ Biblioteca 'pypdf' ausente. Ignorando Deep Scan.", apenas_terminal=True)
+                    fonte_detalhe += " (Instale: pip install pypdf)"
+                    pdf_texto_puro = "⚠️ A biblioteca 'pypdf' não está instalada no sistema. \nPara ativar a leitura de PDFs, abra o terminal e digite: pip install pypdf"
+
+            # --- INTELIGÊNCIA HEURÍSTICA: RADAR EXPANDIDO ---
             req_amostra = "⚠️ EXIGIDA / APLICÁVEL" if re.search(r'\bamostra[s]?\b|\bprova de conceito\b|\bpoc\b|\bprotótipo\b', texto_completo) else "✅ Não detectada explicitamente"
-            req_garantia = "⚠️ EXIGIDA" if re.search(r'\bgarantia contratual\b|\bcaução\b|\bseguro-garantia\b|\bseguro garantia\b', texto_completo) else "✅ Não detectada explicitamente"
+            req_garantia = "⚠️ EXIGIDA" if re.search(r'\bgarantia contratual\b|\bgarantia de execução\b|\bcaução\b|\bseguro-garantia\b|\bseguro garantia\b', texto_completo) else "✅ Não detectada explicitamente"
             req_balanco = "⚠️ EXIGIDO" if re.search(r'\bbalanço patrimonial\b|\bíndices contábeis\b|\bcapacidade econômico-financeira\b|\bcapital social mínimo\b', texto_completo) else "✅ Não detectado explicitamente"
             req_visita = "⚠️ OBRIGATÓRIA / RECOMENDADA" if re.search(r'\bvisita técnica\b|\bvistoria\b|\batestado de visita\b', texto_completo) else "✅ Não detectada"
-            req_meepp = "🎯 SIM (Exclusivo ou Cota)" if re.search(r'\bexclusivo para me\b|\bepp\b|\bparticipação exclusiva\b|\bcota reservada\b|\blc 123\b|\blei complementar 123\b', texto_completo) else "⚖️ Ampla Concorrência (Não detectado)"
-            req_certificacao = "📑 EXIGIDA (Verifique o edital)" if re.search(r'\banvisa\b|\binmetro\b|\bcrea\b|\bcrm\b|\biso 9001\b|\bafe\b|\bautorização de funcionamento\b', texto_completo) else "✅ Nenhuma certificação detectada"
+            req_certificacao = "📑 EXIGIDA (Verifique o edital)" if re.search(r'\banvisa\b|\binmetro\b|\bcrea\b|\bcrm\b|\bcrmv\b|\biso 9001\b|\bafe\b|\bautorização de funcionamento\b|\balvará sanitário\b', texto_completo) else "✅ Nenhuma certificação detectada"
             req_subcontratacao = "⚠️ MENCIONADA (Verifique limites)" if re.search(r'\bsubcontratação\b|\bsubcontratar\b', texto_completo) else "✅ Não mencionada"
 
-            # --- NOVA INTELIGÊNCIA HEURÍSTICA: LOGÍSTICA E PAGAMENTO ---
-            # Tentativa de extrair dias exatos de pagamento
-            pag_match = re.search(r'(?:pagamento|pagos|pago).*?(?:em|até) (\d{1,3} dias)', texto_completo)
-            if pag_match: req_pagamento = f"💸 ATÉ {pag_match.group(1).upper()} (Geralmente após ateste da Nota Fiscal)"
-            elif re.search(r'\bprazo de pagamento\b|\bprazo para pagamento\b|\bpagamento\b', texto_completo): req_pagamento = "💸 MENCIONADO (Consulte as Informações Complementares abaixo)"
-            else: req_pagamento = "💸 Regra padrão (Verificar TR completo)"
+            if not tem_me_epp and re.search(r'\bexclusivo para me\b|\bepp\b|\bcota reservada\b|\blc 123\b|\blei complementar 123\b', texto_completo):
+                req_meepp = "🎯 SIM (Encontrado no texto do Edital/Resumo)"
 
-            # Tentativa de extrair dias exatos de entrega
-            ent_match = re.search(r'(?:entrega|entregue|execução).*?(?:em|até) (\d{1,3} dias)', texto_completo)
-            if ent_match: req_prazo = f"⏳ ATÉ {ent_match.group(1).upper()} (Geralmente contados do Empenho/Contrato)"
-            elif re.search(r'\bprazo de entrega\b|\bprazo de vigência\b|\bnota de empenho\b', texto_completo): req_prazo = "⏳ MENCIONADO (Consulte as Informações Complementares abaixo)"
-            else: req_prazo = "⏳ Não explícito no resumo (Verificar TR)"
+            # --- HEURÍSTICA DE LOGÍSTICA E PAGAMENTO ---
+            pag_match = re.search(r'(?:pagamento|pagos|pago|faturamento).*?(?:em|até|prazo de) (\d{1,3}\s*dias)', texto_completo)
+            if pag_match: 
+                req_pagamento = f"💸 ATÉ {pag_match.group(1).upper()}"
+            else:
+                pag_context = re.search(r'(?:prazo(?: para| de)? pagamento|pagamento efetuado|pagamento será)\s*(?:é|de|em|até|:)?\s*([^.]{5,80})', texto_completo)
+                if pag_context: req_pagamento = f"💸 \"...{pag_context.group(1).strip().capitalize()}...\""
+                else: req_pagamento = "💸 Regra padrão (Verificar TR completo)"
 
-            # Local e Parcelamento
-            req_parcelada = "📦 SIM (Sob Demanda / Fracionada / Contínua)" if re.search(r'\bparcelada\b|\bsob demanda\b|\bfracionada\b|\bcronograma\b|\bfornecimento contínuo\b', texto_completo) else "📦 Não mencionada (Presume-se entrega única)"
-            req_local = "📍 MENCIONADO (Leia as informações abaixo ou o TR)" if re.search(r'\blocal de entrega\b|\bendereço\b|\blocal da execução\b|\bentregue[s]? em\b', texto_completo) else "🏢 Sede do Órgão Contratante (Presumido)"
+            ent_match = re.search(r'(?:entrega|entregue|execução).*?(?:em|até|prazo de) (\d{1,3}\s*dias)', texto_completo)
+            if ent_match: 
+                req_prazo = f"⏳ ATÉ {ent_match.group(1).upper()}"
+            else:
+                ent_context = re.search(r'(?:prazo de entrega|entregue em|entregues em)\s*(?:é|de|em|até|:)?\s*([^.]{5,80})', texto_completo)
+                if ent_context: req_prazo = f"⏳ \"...{ent_context.group(1).strip().capitalize()}...\""
+                else: req_prazo = "⏳ Não explícito (Verificar TR)"
 
-            # --- CONSTRUÇÃO DO RELATÓRIO ---
+            req_parcelada = "📦 SIM (Sob Demanda / Fracionada / Contínua)" if re.search(r'\bparcelada[s]?\b|\bsob demanda\b|\bconforme demanda\b|\bfracionada\b|\bcronograma\b|\bfornecimento contínuo\b', texto_completo) else "📦 Não mencionada (Presume-se entrega única)"
+            
+            local_context = re.search(r'(?:local de entrega|entregue no|entregue na|entregues na|entregues no|local da execução)\s*(?:é|será|:)?\s*([^.]{5,80})', texto_completo)
+            if local_context: req_local = f"📍 \"...{local_context.group(1).strip().capitalize()}...\""
+            else: req_local = "🏢 Sede do Órgão Contratante (Presumido)"
+
             relatorio = f"📊 RELATÓRIO DE ANÁLISE INTELIGENTE DO EDITAL\n"
-            relatorio += f"📡 FONTE DOS DADOS: {fonte}\n"
+            relatorio += f"📡 FONTES ANALISADAS: {fonte_detalhe}\n"
             relatorio += "="*80 + "\n\n"
             
             relatorio += f"1️⃣ INFORMAÇÕES GERAIS E CONTRATUAIS\n"
@@ -665,34 +744,73 @@ class BuscadorPNCP(ctk.CTk):
             relatorio += f"🤝 Subcontratação: {req_subcontratacao}\n"
             relatorio += "-"*80 + "\n\n"
             
-            relatorio += f"4️⃣ OBJETO DA CONTRATAÇÃO (Íntegra)\n"
+            relatorio += f"4️⃣ OBJETO DA CONTRATAÇÃO (Resumo Oficial)\n"
             relatorio += f"{objeto}\n\n"
             
-            relatorio += f"5️⃣ INFORMAÇÕES COMPLEMENTARES E EXIGÊNCIAS\n"
+            relatorio += f"5️⃣ INFORMAÇÕES COMPLEMENTARES DA API\n"
             relatorio += f"{info_comp}\n"
             
-            self.after(0, lambda: self.mostrar_janela_analise(relatorio))
+            # Envia as 3 variáveis (Relatório, Texto PDF e Arquivos) para a nova janela UI
+            self.after(0, lambda: self.mostrar_janela_analise(relatorio, pdf_texto_puro, arquivos_lista))
 
         except Exception as e:
             self.registrar_log(f"[ANALISE ERROR] {e}", apenas_terminal=True)
             self.after(0, lambda erro=str(e): messagebox.showerror("Erro", f"Erro na análise: {erro}"))
         finally:
-            self.after(0, lambda: self.btn_analise.configure(text="🧠 Analisar Edital\n(Resumo Inteligente)", state="normal"))
-            
-    def mostrar_janela_analise(self, relatorio_texto):
+            self.after(0, lambda: self.btn_analise.configure(text="🧠 Analisar Edital\n(Varredura Profunda)", state="normal"))
+
+    def mostrar_janela_analise(self, relatorio_texto, texto_pdf, arquivos):
         janela_an = ctk.CTkToplevel(self)
-        janela_an.title("Análise Inteligente de Edital (Texto Integral)")
-        janela_an.geometry("900x700")
+        janela_an.title("Painel de Análise e Documentos Oficiais do Edital")
+        janela_an.geometry("1000x750")
         janela_an.transient(self)
         
-        lbl_info = ctk.CTkLabel(janela_an, text="Resultado da Extração Automática:", font=("Arial", 14, "bold"), text_color="#8e44ad")
-        lbl_info.pack(pady=10, padx=15, anchor="w")
-        
-        txt_resumo = ctk.CTkTextbox(janela_an, font=("Consolas", 12), fg_color="#fdfdfd", text_color="#2c3e50")
-        txt_resumo.pack(fill="both", expand=True, padx=15, pady=(0, 15))
+        # Criação do Sistema de Abas (Tabs)
+        tabview = ctk.CTkTabview(janela_an)
+        tabview.pack(fill="both", expand=True, padx=10, pady=10)
+
+        tab_resumo = tabview.add("📊 Resumo Inteligente (Radar)")
+        tab_texto_pdf = tabview.add("📄 Texto Extraído do PDF")
+        tab_arquivos = tabview.add("📂 Listagem de Arquivos/Download")
+
+        # --- ABA 1: RESUMO DO RADAR HEURÍSTICO ---
+        txt_resumo = ctk.CTkTextbox(tab_resumo, font=("Consolas", 12), fg_color="#fdfdfd", text_color="#2c3e50")
+        txt_resumo.pack(fill="both", expand=True, padx=5, pady=5)
         txt_resumo.insert("end", relatorio_texto)
         txt_resumo.configure(state="disabled")
 
+        # --- ABA 2: TEXTO PURO DO PDF LIDO NA ÍNTEGRA ---
+        txt_pdf = ctk.CTkTextbox(tab_texto_pdf, font=("Consolas", 11), fg_color="#fdfdfd", text_color="#34495e")
+        txt_pdf.pack(fill="both", expand=True, padx=5, pady=5)
+        if texto_pdf.strip():
+            txt_pdf.insert("end", texto_pdf)
+        else:
+            txt_pdf.insert("end", "⚠️ O texto do PDF principal não pôde ser extraído.\nMotivos comuns:\n- O edital está bloqueado/protegido com senha.\n- O edital é composto apenas por imagens escaneadas (não tem texto puro).\n- Nenhum PDF foi identificado na lista de anexos.")
+        txt_pdf.configure(state="disabled")
+
+        # --- ABA 3: ARQUIVOS E BOTÕES DE DOWNLOAD ---
+        if not arquivos:
+            ctk.CTkLabel(tab_arquivos, text="⚠️ Nenhum anexo ou documento foi disponibilizado no sistema do PNCP para este edital.", font=("Arial", 14)).pack(pady=30)
+        else:
+            lbl_info = ctk.CTkLabel(tab_arquivos, text="Documentos originais associados à contratação:", font=("Arial", 12, "bold"))
+            lbl_info.pack(pady=10, padx=10, anchor="w")
+            
+            frame_lista = ctk.CTkScrollableFrame(tab_arquivos)
+            frame_lista.pack(fill="both", expand=True, padx=5, pady=(0, 10))
+            
+            for arq in arquivos:
+                frame_item = ctk.CTkFrame(frame_lista, fg_color="#ecf0f1", corner_radius=5)
+                frame_item.pack(fill="x", pady=5, padx=2)
+                
+                titulo = arq.get("titulo", "S/ Título")
+                tipo = arq.get("tipoDocumentoNome", "Anexo")
+                url_doc = arq.get("url", "")
+                
+                ctk.CTkLabel(frame_item, text=f"[{tipo}]\n{titulo}", font=("Arial", 11, "bold"), text_color="#2c3e50", anchor="w", justify="left", wraplength=700).pack(side="left", padx=10, pady=10, fill="x", expand=True)
+                
+                if url_doc: 
+                    ctk.CTkButton(frame_item, text="📥 Abrir PDF / Download", width=140, fg_color="#2980b9", hover_color="#1a5276", font=("Arial", 11, "bold"), command=lambda u=url_doc: webbrowser.open(u)).pack(side="right", padx=10, pady=10)
+    
     # ---------------------------------------------------------
     # UI COMPLETA (Interface Gráfica e Menus)
     # ---------------------------------------------------------
@@ -715,9 +833,7 @@ class BuscadorPNCP(ctk.CTk):
         self.modalidades_map = {"Principais (Pregão, Dispensa, Conc.)": "", "1 - Leilão Eletrônico": "1", "2 - Diálogo Competitivo": "2", "3 - Concurso": "3", "4 - Concorrência Eletrônica": "4", "5 - Concorrência Presencial": "5", "6 - Pregão Eletrônico": "6", "7 - Pregão Presencial": "7", "8 - Dispensa de Licitação": "8", "9 - Inexigibilidade": "9", "10 - Manifestação de Interesse": "10", "11 - Pré-qualificação": "11", "12 - Credenciamento": "12", "13 - Leilão Presencial": "13"}
         self.lista_ufs = ["Todas", "AC", "AL", "AP", "AM", "BA", "CE", "DF", "ES", "GO", "MA", "MT", "MS", "MG", "PA", "PB", "PR", "PE", "PI", "RJ", "RN", "RS", "RO", "RR", "SC", "SP", "SE", "TO"]
         
-        # ---> LINHA CORRIGIDA (Liga a conexão HTTP do aplicativo) <---
         self._renovar_sessao_http()
-        
         self.criar_menu_superior()
         self.criar_interface()
 
@@ -1030,7 +1146,7 @@ class BuscadorPNCP(ctk.CTk):
         self.btn_arquivos.pack(side="right", padx=(5, 0))
 
         self.btn_analise = ctk.CTkButton(
-            self.frame_detalhes, text="🧠 Analisar Edital\n(Resumo Inteligente)", width=160, height=100,
+            self.frame_detalhes, text="🧠 Analisar Edital\n(Varredura Profunda)", width=160, height=100,
             fg_color="#8e44ad", hover_color="#732d91", state="disabled", font=("Arial", 12, "bold"), command=self.abrir_janela_analise
         )
         self.btn_analise.pack(side="right", padx=(5, 0))
