@@ -24,86 +24,312 @@ import base64
 ctk.set_appearance_mode("Light")
 ctk.set_default_color_theme("blue")
 
-def obter_caminho_recurso(caminho_relativo):
-    """ Obtém o caminho absoluto do recurso, compatível com Nuitka, PyInstaller e Python normal """
-    base_path = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
-    return os.path.join(base_path, caminho_relativo)
+# ==============================================================================
+# 1. CLASSE DE UTILITÁRIOS (Lógica de Formatação e Caminhos)
+# ==============================================================================
+class Utils:
+    @staticmethod
+    def obter_caminho_recurso(caminho_relativo):
+        """ Obtém o caminho absoluto do recurso, compatível com Nuitka e PyInstaller """
+        base_path = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
+        return os.path.join(base_path, caminho_relativo)
 
-def normalizar_texto(texto: str) -> str:
-    if not texto: return ""
-    nfkd = unicodedata.normalize("NFKD", str(texto))
-    texto_sem_acento = "".join([c for c in nfkd if not unicodedata.combining(c)])
-    return texto_sem_acento.lower().strip()
+    @staticmethod
+    def normalizar_texto(texto: str) -> str:
+        if not texto: return ""
+        nfkd = unicodedata.normalize("NFKD", str(texto))
+        texto_sem_acento = "".join([c for c in nfkd if not unicodedata.combining(c)])
+        return texto_sem_acento.lower().strip()
 
-def extrair_grupos_radicais(termo_multiplo: str) -> list:
-    grupos = []
-    for parte in termo_multiplo.split(','):
-        parte = parte.strip()
-        if not parte: continue
-        palavras = [p for p in normalizar_texto(parte).split() if len(p) >= 2]
-        radicais = []
-        for p in palavras:
-            rad = p
-            if p.endswith("es") and len(p) > 3: rad = p[:-2]
-            elif p.endswith("s") and len(p) > 3: rad = p[:-1]
-            radicais.append(rad)
-        if radicais:
-            grupos.append(radicais)
-    return grupos
+    @staticmethod
+    def extrair_grupos_radicais(termo_multiplo: str) -> list:
+        grupos = []
+        for parte in termo_multiplo.split(','):
+            parte = parte.strip()
+            if not parte: continue
+            palavras = [p for p in Utils.normalizar_texto(parte).split() if len(p) >= 2]
+            radicais = []
+            for p in palavras:
+                rad = p
+                if p.endswith("es") and len(p) > 3: rad = p[:-2]
+                elif p.endswith("s") and len(p) > 3: rad = p[:-1]
+                radicais.append(rad)
+            if radicais: grupos.append(radicais)
+        return grupos
 
-def texto_atende_busca(texto: str, grupos_radicais: list) -> bool:
-    if not grupos_radicais: return True 
-    texto_norm = normalizar_texto(texto)
-    for radicais_frase in grupos_radicais:
-        if all(rad in texto_norm for rad in radicais_frase):
-            return True
-    return False
+    @staticmethod
+    def texto_atende_busca(texto: str, grupos_radicais: list) -> bool:
+        if not grupos_radicais: return True 
+        texto_norm = Utils.normalizar_texto(texto)
+        for radicais_frase in grupos_radicais:
+            if all(rad in texto_norm for rad in radicais_frase):
+                return True
+        return False
 
-def formatar_data_hora(data_iso: str) -> str:
-    if not data_iso: return "Não informada"
-    try:
-        return datetime.datetime.fromisoformat(data_iso.split('.')[0]).strftime("%d/%m/%Y %H:%M")
-    except:
-        return str(data_iso)[:16].replace("T", " ")
+    @staticmethod
+    def formatar_data_hora(data_iso: str) -> str:
+        if not data_iso: return "Não informada"
+        try: return datetime.datetime.fromisoformat(data_iso.split('.')[0]).strftime("%d/%m/%Y %H:%M")
+        except: return str(data_iso)[:16].replace("T", " ")
+
+    @staticmethod
+    def formatar_moeda(valor):
+        if not valor: return "Não informado"
+        try:
+            val = float(valor)
+            return "Não informado" if val == 0.0 else f"R$ {val:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+        except: return "Não informado"
+
+    @staticmethod
+    def formatar_data_api(data_str):
+        try:
+            p = data_str.strip().split("/")
+            if len(p) == 3: return f"{p[2]}{p[1].zfill(2)}{p[0].zfill(2)}"
+        except: pass
+        return data_str
+
+# ==============================================================================
+# 2. CLASSE DO TERMINAL SECRETO DE DEPURAÇÃO (UI)
+# ==============================================================================
+class TerminalSecreto(ctk.CTkToplevel):
+    def __init__(self, master, historico_inicial):
+        super().__init__(master)
+        self.title("Terminal de Logs Detalhado - Administrador")
+        self.geometry("900x550")
+        self.configure(fg_color="#0a0a0a")
+        self.transient(master)
+
+        lbl_titulo = ctk.CTkLabel(self, text="Terminal de Depuração - Monitor de Backend", text_color="#2ecc71", font=("Consolas", 14, "bold"))
+        lbl_titulo.pack(anchor="w", padx=10, pady=5)
+
+        self.txt_terminal = ctk.CTkTextbox(self, font=("Consolas", 11), fg_color="#121212", text_color="#2ecc71")
+        self.txt_terminal.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+
+        if historico_inicial:
+            self.txt_terminal.insert("end", "\n".join(historico_inicial) + "\n")
+            self.txt_terminal.see("end")
+
+    def registrar_linha(self, linha_log):
+        self.txt_terminal.insert("end", f"{linha_log}\n")
+        self.txt_terminal.see("end")
 
 
+# ==============================================================================
+# 3. CLASSE DE GERENCIAMENTO DE BANCO DE DADOS (SQLite)
+# ==============================================================================
+class DatabaseManager:
+    def __init__(self, db_path, logger_func, chave_seguranca):
+        self.db_path = db_path
+        self.log = logger_func
+        self.chave_seguranca = chave_seguranca
+        self.cache_historico = {}
+        self.iniciar_banco()
+
+    def iniciar_banco(self):
+        self.log("[SQLITE] Inicializando banco de dados...", apenas_terminal=True)
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute("""CREATE TABLE IF NOT EXISTS editais_itens (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, 
+                    orgao TEXT, uf TEXT, objeto_contrato TEXT, desc_item TEXT, 
+                    quantidade REAL, vlr_unit_est TEXT, vlr_total_est TEXT, 
+                    vlr_unit_hom TEXT, vlr_total_hom TEXT, data_publicacao TEXT, 
+                    data_abertura TEXT, data_encerramento TEXT, cnpj TEXT, 
+                    ano INTEGER, sequencial INTEGER, numero_compra TEXT, uasg TEXT, 
+                    numero_item INTEGER, modalidade_id TEXT, modalidade_nome TEXT, 
+                    portal_nome TEXT, data_cadastro TIMESTAMP DEFAULT CURRENT_TIMESTAMP, 
+                    UNIQUE(cnpj, ano, sequencial, numero_item, desc_item) ON CONFLICT REPLACE
+                )""")
+                cursor.execute("CREATE TABLE IF NOT EXISTS usuario_licenca (id INTEGER PRIMARY KEY AUTOINCREMENT, token TEXT NOT NULL)")
+                conn.commit()
+        except Exception as e:
+            self.log(f"[SQLITE ERROR] Falha ao iniciar DB: {e}", apenas_terminal=True)
+
+    def obter_cnpj_licenciado(self):
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT token FROM usuario_licenca ORDER BY id DESC LIMIT 1")
+                row = cursor.fetchone()
+                if not row: return None
+                
+                token_bruto = base64.b64decode(row[0].encode()).decode()
+                cnpj_salvo, data_validade, assinatura_salva = token_bruto.split('|')
+                if hmac.new(self.chave_seguranca, f"{cnpj_salvo}|{data_validade}".encode(), hashlib.sha256).hexdigest() != assinatura_salva: return None
+                if datetime.datetime.now().strftime("%Y-%m-%d") > data_validade[:10]: return None
+                return cnpj_salvo
+        except: return None 
+
+    def salvar_licenca(self, cnpj, data_validade):
+        dados_licenca = f"{cnpj}|{data_validade}"
+        assinatura = hmac.new(self.chave_seguranca, dados_licenca.encode(), hashlib.sha256).hexdigest()
+        token_seguro = base64.b64encode(f"{dados_licenca}|{assinatura}".encode()).decode()
+        with sqlite3.connect(self.db_path, timeout=10) as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM usuario_licenca")
+            cursor.execute("INSERT INTO usuario_licenca (token) VALUES (?)", (token_seguro,))
+            conn.commit()
+
+    def salvar_item_edital(self, item_dict):
+        try:
+            with sqlite3.connect(self.db_path, timeout=10) as conn:
+                cursor = conn.cursor()
+                cursor.execute("""INSERT OR REPLACE INTO editais_itens (
+                    orgao, uf, objeto_contrato, desc_item, quantidade, vlr_unit_est, 
+                    vlr_total_est, vlr_unit_hom, vlr_total_hom, data_publicacao, 
+                    data_abertura, data_encerramento, cnpj, ano, sequencial, 
+                    numero_compra, uasg, numero_item, modalidade_id, modalidade_nome, portal_nome
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", (
+                    item_dict.get("Orgao"), item_dict.get("UF"), item_dict.get("ObjetoContrato"), 
+                    item_dict.get("DescItem"), item_dict.get("Qtd"), item_dict.get("Vlr Unit Est"), 
+                    item_dict.get("Vlr Total Est"), item_dict.get("Vlr Unit Hom"), item_dict.get("Vlr Total Hom"), 
+                    item_dict.get("Data Pub"), item_dict.get("Data Abertura"), item_dict.get("Data Encerramento"), 
+                    item_dict.get("CNPJ", ""), item_dict.get("Ano", 0), item_dict.get("Sequencial", 0), 
+                    item_dict.get("NumeroCompra", ""), item_dict.get("UASG", ""), item_dict.get("NumeroItem", 0), 
+                    item_dict.get("ModalidadeID", ""), item_dict.get("ModalidadeNome", ""), item_dict.get("PortalNome", "")
+                ))
+                conn.commit()
+        except Exception as e:
+            self.log(f"[SQLITE ERROR] Falha ao salvar item: {e}", apenas_terminal=True)
+
+    def executar_leitura(self, sql, params):
+        self.log(f"[SQL EXEC] Query: {sql} | Params: {params}", apenas_terminal=True)
+        with sqlite3.connect(self.db_path) as conn:
+            return conn.cursor().execute(sql, params).fetchall()
+
+    def obter_historico_precos(self, desc_item, orgao, uf_atual):
+        cache_key = (desc_item, orgao, uf_atual)
+        if cache_key in self.cache_historico:
+            return self.cache_historico[cache_key]
+        
+        try:
+            um_ano_atras = (datetime.datetime.now() - datetime.timedelta(days=365)).strftime("%Y-%m-%d")
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT orgao, uf, vlr_unit_hom FROM editais_itens WHERE desc_item = ? AND data_publicacao >= ? ORDER BY data_publicacao DESC", (desc_item, um_ano_atras))
+                linhas = cursor.fetchall()
+            
+            soma_orgao, qtd_orgao, soma_geral, qtd_geral = 0.0, 0, 0.0, 0
+            ultimo_orgao, ultimo_regiao = "Sem Histórico", "Sem Histórico"
+            
+            for row in linhas:
+                orgao_db, uf_db, vlr_str = row[0], row[1], row[2]
+                if not vlr_str or vlr_str == "Não informado": continue
+                
+                try: val_float = float(vlr_str.replace("R$ ", "").replace(".", "").replace(",", "."))
+                except: continue
+                if val_float <= 0: continue
+                
+                if orgao_db == orgao:
+                    soma_orgao += val_float
+                    qtd_orgao += 1
+                    if ultimo_orgao == "Sem Histórico": ultimo_orgao = Utils.formatar_moeda(val_float)
+                else:
+                    soma_geral += val_float
+                    qtd_geral += 1
+                    
+                if uf_db == uf_atual and ultimo_regiao == "Sem Histórico":
+                    ultimo_regiao = Utils.formatar_moeda(val_float)
+                    
+            media_org = Utils.formatar_moeda(soma_orgao / qtd_orgao) if qtd_orgao > 0 else "Sem Histórico"
+            media_ger = Utils.formatar_moeda(soma_geral / qtd_geral) if qtd_geral > 0 else "Sem Histórico"
+            
+            retorno = (media_org, media_ger, ultimo_orgao, ultimo_regiao)
+            self.cache_historico[cache_key] = retorno
+            return retorno
+        except Exception as e:
+            self.log(f"[DB] Erro ao calcular histórico: {e}", apenas_terminal=True)
+            return "Sem Histórico", "Sem Histórico", "Sem Histórico", "Sem Histórico"
+
+    def limpar_cache(self):
+        self.cache_historico = {}
+
+
+# ==============================================================================
+# 4. CLASSE PRINCIPAL DO APP (Lógica de Rede e Interface Gráfica)
+# ==============================================================================
 class BuscadorPNCP(ctk.CTk):
     def __init__(self):
         super().__init__()
 
-        self.versao_local = "8.18"
-        
+        self.versao_local = "9.1.0"
         self.title(f"Buscador Multi-Portal de Licitações & Preços - Compras Públicas | Versão {self.versao_local}")
         self.geometry("1180x920")
         
-        try: self.iconbitmap(obter_caminho_recurso("icone.ico"))
+        try: self.iconbitmap(Utils.obter_caminho_recurso("icone.ico"))
         except: pass
 
-        # INSIRA AQUI AS SUAS URLs DA VERCEL
         self.url_api_versao = "https://meu-validador-licencas.vercel.app/api/versao"
         self.url_api_licenca = "https://meu-validador-licencas.vercel.app/api/valida"
-        
         self.chave_seguranca = b'kM7hQ7uX1x4qW8zF3rN9mT2vP5yC8aD4gG6jH9kL1sM=' 
-        self.db_path = "licitacoes_pncp_v10.db"
 
-        self.withdraw()
-
+        # Variáveis de Estado (MUITO IMPORTANTE: INICIAR ANTES DO BANCO DE DADOS)
+        self.historico_debug = []
         self.cancelar_busca = False
         self.cancelar_carga = False
         self.is_carga_running = False
         self.mostrar_carga_no_grid = False 
-        
         self.item_selecionado_doc = None
         self.resultados_pncp = []
-        self.historico_debug = []
-        self.cache_historico = {}
+        self.cnpj_ativo = None
+        self.janela_terminal = None
+        self.palavras_chave_empresa = [] # Guarda o perfil CNAE em background
 
+        # Componentes Isolados
+        self.db = DatabaseManager("licitacoes_pncp_v10.db", self.registrar_log, self.chave_seguranca)
+
+        self.withdraw()
         self.after(200, self._rotina_de_arranque)
 
+    # ---------------------------------------------------------
+    # SISTEMA DE LOGS INTERNOS
+    # ---------------------------------------------------------
+    def registrar_log(self, mensagem, apenas_terminal=False):
+        hora_atual = datetime.datetime.now().strftime('%H:%M:%S')
+        linha_log = f"[{hora_atual}] {mensagem}"
+        print(linha_log.strip())
+        
+        self.historico_debug.append(linha_log)
+        if len(self.historico_debug) > 1500: self.historico_debug.pop(0)
+        
+        if not apenas_terminal and hasattr(self, "txt_logs"): 
+            self.after(0, lambda m=linha_log: [self.txt_logs.insert("end", f"{m}\n"), self.txt_logs.see("end")])
+            
+        if self.janela_terminal and self.janela_terminal.winfo_exists():
+            self.after(0, lambda m=linha_log: self.janela_terminal.registrar_linha(m))
+
+    def _abrir_prompt_terminal(self, event=None):
+        janela_senha = ctk.CTkToplevel(self)
+        janela_senha.title("Acesso Restrito - Manutenção")
+        janela_senha.geometry("350x180")
+        janela_senha.transient(self)
+        janela_senha.grab_set()
+
+        ctk.CTkLabel(janela_senha, text="🛠️ Modo de Suporte\n\nIntroduza a Senha Mestra:", font=("Arial", 12, "bold")).pack(pady=(20, 10))
+        ent_senha = ctk.CTkEntry(janela_senha, width=200, show="*")
+        ent_senha.pack(pady=5)
+        ent_senha.focus()
+
+        def validar(e=None):
+            if ent_senha.get() == "suporte@2026":
+                janela_senha.destroy()
+                if not self.janela_terminal or not self.janela_terminal.winfo_exists():
+                    self.janela_terminal = TerminalSecreto(self, self.historico_debug)
+                else: self.janela_terminal.focus()
+            else:
+                messagebox.showerror("Acesso Negado", "Palavra-passe incorreta.")
+                janela_senha.destroy()
+
+        ent_senha.bind("<Return>", validar)
+        ctk.CTkButton(janela_senha, text="Aceder", command=validar, fg_color="#c0392b", hover_color="#e74c3c").pack(pady=15)
+
+    # ---------------------------------------------------------
+    # ARRANQUE E VERIFICAÇÕES DE REDE (Auth e Updates)
+    # ---------------------------------------------------------
     def _rotina_de_arranque(self):
         if not self.verificar_versao_inicial(): return 
-        self.setup_db_licenca()
-        self.cnpj_ativo = self.get_cnpj_registrado()
+        self.cnpj_ativo = self.db.obter_cnpj_licenciado()
 
         if not self.cnpj_ativo:
             self.solicitar_registro_cnpj()
@@ -122,16 +348,12 @@ class BuscadorPNCP(ctk.CTk):
             versao_minima = dados.get("versao_minima_obrigatoria", "0.0")
             link_download = dados.get("url_download")
 
-            v_local = float(self.versao_local)
-            v_nuvem = float(versao_nuvem)
-            v_minima = float(versao_minima)
-
-            if v_local < v_minima:
-                messagebox.showerror("Atualização Obrigatória", f"A sua versão ({v_local}) foi descontinuada.\nO sistema será atualizado agora para a versão {v_nuvem}.")
+            if float(self.versao_local) < float(versao_minima):
+                messagebox.showerror("Atualização Obrigatória", f"A sua versão foi descontinuada.\nO sistema será atualizado agora para a versão {versao_nuvem}.")
                 self.executar_download_e_atualizacao(link_download)
                 return False 
-            elif v_local < v_nuvem:
-                if messagebox.askyesno("Atualização Disponível", f"Nova versão {v_nuvem} encontrada!\n\nDeseja atualizar o sistema agora? (Recomendado)"):
+            elif float(self.versao_local) < float(versao_nuvem):
+                if messagebox.askyesno("Atualização Disponível", f"Nova versão {versao_nuvem} encontrada!\n\nDeseja atualizar o sistema agora? (Recomendado)"):
                     self.executar_download_e_atualizacao(link_download)
                     return False
             return True
@@ -166,14 +388,12 @@ class BuscadorPNCP(ctk.CTk):
             messagebox.showerror("Erro na Atualização", f"Falha ao transferir a atualização: {e}\n\nFaça o download manualmente.")
             sys.exit()
 
-    def obter_hwid(self) -> str: return str(uuid.getnode())
-
     def validar_licenca_online(self, cnpj_licenca: str, silencioso=False):
         if not self.url_api_licenca or "SUA-URL-AQUI" in self.url_api_licenca:
             if not silencioso: messagebox.showerror("Erro de Configuração", "A URL da API da Vercel não foi configurada.")
             return False, None
 
-        payload = {"cnpj": cnpj_licenca, "hwid": self.obter_hwid(), "maquina": platform.node(), "data_acesso": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "versao_atual": self.versao_local}
+        payload = {"cnpj": cnpj_licenca, "hwid": str(uuid.getnode()), "maquina": platform.node(), "data_acesso": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "versao_atual": self.versao_local}
         self.registrar_log(f"[AUTH] Validando licença para CNPJ: {cnpj_licenca}", apenas_terminal=True)
         try:
             response = requests.post(self.url_api_licenca, json=payload, timeout=10)
@@ -188,29 +408,6 @@ class BuscadorPNCP(ctk.CTk):
         except Exception as e:
             if not silencioso: messagebox.showerror("Erro de Conexão", f"Falha de internet:\n{e}")
             return False, None
-
-    def setup_db_licenca(self):
-        try:
-            with sqlite3.connect(self.db_path) as conn:
-                cursor = conn.cursor()
-                cursor.execute("CREATE TABLE IF NOT EXISTS usuario_licenca (id INTEGER PRIMARY KEY AUTOINCREMENT, token TEXT NOT NULL)")
-                conn.commit()
-        except: sys.exit()
-
-    def get_cnpj_registrado(self):
-        try:
-            with sqlite3.connect(self.db_path) as conn:
-                cursor = conn.cursor()
-                cursor.execute("SELECT token FROM usuario_licenca ORDER BY id DESC LIMIT 1")
-                row = cursor.fetchone()
-                if not row: return None
-                
-                token_bruto = base64.b64decode(row[0].encode()).decode()
-                cnpj_salvo, data_validade, assinatura_salva = token_bruto.split('|')
-                if hmac.new(self.chave_seguranca, f"{cnpj_salvo}|{data_validade}".encode(), hashlib.sha256).hexdigest() != assinatura_salva: return None
-                if datetime.datetime.now().strftime("%Y-%m-%d") > data_validade[:10]: return None
-                return cnpj_salvo
-        except: return None 
 
     def solicitar_registro_cnpj(self):
         self.janela_login = ctk.CTkToplevel(self)
@@ -236,15 +433,7 @@ class BuscadorPNCP(ctk.CTk):
         sucesso, data_validade = self.validar_licenca_online(cnpj, silencioso=False)
         if sucesso:
             try:
-                dados_licenca = f"{cnpj}|{data_validade}"
-                assinatura = hmac.new(self.chave_seguranca, dados_licenca.encode(), hashlib.sha256).hexdigest()
-                token_seguro = base64.b64encode(f"{dados_licenca}|{assinatura}".encode()).decode()
-
-                with sqlite3.connect(self.db_path, timeout=10) as conn:
-                    cursor = conn.cursor()
-                    cursor.execute("DELETE FROM usuario_licenca")
-                    cursor.execute("INSERT INTO usuario_licenca (token) VALUES (?)", (token_seguro,))
-                    conn.commit()
+                self.db.salvar_licenca(cnpj, data_validade)
                 self.cnpj_ativo = cnpj
                 messagebox.showinfo("Sucesso", "Licença ativada com sucesso!")
                 self.janela_login.destroy()
@@ -254,20 +443,92 @@ class BuscadorPNCP(ctk.CTk):
                 self.btn_ativar.configure(text="Validar Online", state="normal")
         else: self.btn_ativar.configure(text="Validar Online", state="normal")
 
+    # ---------------------------------------------------------
+    # CLIENTE HTTP CENTRALIZADO (Mecanismo Anti-429)
+    # ---------------------------------------------------------
+    def _renovar_sessao_http(self):
+        self.registrar_log("[NETWORK] SESSÃO HTTP RENOVADA.", apenas_terminal=True)
+        self.http_session = requests.Session()
+        self.http_session.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)", "Accept": "application/json, text/plain, */*", "Referer": "https://pncp.gov.br/"})
+
+    def _get_com_retentativa(self, url, params, max_tentativas=5, timeout=15, tipo_operacao="busca"):
+        self.registrar_log(f"[HTTP GET] Iniciando request -> {url}", apenas_terminal=True)
+        self.registrar_log(f"           [PARAMS] {params}", apenas_terminal=True)
+        
+        time.sleep(0.15) # Pacing Anti-429
+        
+        for tentativa in range(1, max_tentativas + 1):
+            if (self.cancelar_busca if tipo_operacao == "busca" else self.cancelar_carga): return None
+            try: 
+                res = self.http_session.get(url, params=params, timeout=(3.0, timeout))
+                
+                if res.status_code == 429:
+                    tempo_espera = tentativa * 3 
+                    self.registrar_log(f"[HTTP 429] 🛑 RATE LIMIT DO PNCP ALCANÇADO! Pausando por {tempo_espera}s...", apenas_terminal=True)
+                    self.registrar_log(f"🛑 O Governo limitou o acesso por excesso de requisições. O robô vai aguardar {tempo_espera}s...", apenas_terminal=False)
+                    for _ in range(int(tempo_espera * 10)):
+                        if (self.cancelar_busca if tipo_operacao == "busca" else self.cancelar_carga): return None
+                        time.sleep(0.1)
+                    continue 
+                
+                self.registrar_log(f"[HTTP {res.status_code}] <- Resposta recebida. ({len(res.content)} bytes)", apenas_terminal=True)
+                return res
+            except Exception as e:
+                if (self.cancelar_busca if tipo_operacao == "busca" else self.cancelar_carga): return None
+                if tentativa == max_tentativas: raise e
+                
+                self.registrar_log(f"⏳ Instabilidade na rede. Tentativa {tentativa}/{max_tentativas} aguardando...", apenas_terminal=False) 
+                self.registrar_log(f"[HTTP RETRY] Falha: {e}. Aguardando...", apenas_terminal=True)
+                for _ in range(20):
+                    if (self.cancelar_busca if tipo_operacao == "busca" else self.cancelar_carga): return None
+                    time.sleep(0.1)
+        return None
+
+    # ---------------------------------------------------------
+    # INTELIGÊNCIA ARTIFICIAL: PERFIL CNAE (BACKGROUND)
+    # ---------------------------------------------------------
+    def _carregar_perfil_empresa_background(self):
+        if not self.cnpj_ativo: return
+        cnpj_limpo = "".join(filter(str.isdigit, self.cnpj_ativo))
+        try:
+            self.registrar_log(f"[IA-CNAE] Construindo perfil silencioso para CNPJ {cnpj_limpo}...", apenas_terminal=True)
+            url = f"https://brasilapi.com.br/api/cnpj/v1/{cnpj_limpo}"
+            res = requests.get(url, timeout=10)
+            
+            if res.status_code == 200:
+                dados = res.json()
+                descricoes = [dados.get("cnae_fiscal_descricao", "")]
+                for cnae_sec in dados.get("cnaes_secundarios", []):
+                    descricoes.append(cnae_sec.get("descricao", ""))
+
+                palavras_ignoradas = {"comercio", "varejista", "atacadista", "de", "e", "artigos", "servicos", "manutencao", "reparacao", "fabricacao", "para", "em", "geral", "outros", "outras", "nao", "especificados", "anteriormente", "uso", "pecas", "acessorios", "instalacao", "construcao", "equipamentos", "maquinas", "aparelhos", "suprimentos", "produtos", "fornecimento"}
+                
+                self.palavras_chave_empresa = []
+                for desc in descricoes:
+                    if not desc: continue
+                    palavras = Utils.normalizar_texto(desc).split()
+                    for p in palavras:
+                        p_limpa = re.sub(r'[^a-z]', '', p)
+                        if len(p_limpa) > 2 and p_limpa not in palavras_ignoradas and p_limpa not in self.palavras_chave_empresa:
+                            self.palavras_chave_empresa.append(p_limpa)
+
+                self.registrar_log(f"[IA-CNAE] Flag de aderência ativa. Palavras mapeadas: {self.palavras_chave_empresa}", apenas_terminal=True)
+        except Exception as e:
+            self.registrar_log(f"[IA-CNAE ERROR] Falha ao criar perfil invisível: {e}", apenas_terminal=True)
+
+    # ---------------------------------------------------------
+    # UI COMPLETA (Interface Gráfica e Menus)
+    # ---------------------------------------------------------
     def iniciar_sistema_principal(self):
         self.deiconify() 
         try: self.state('zoomed')
         except: self.attributes('-zoomed', True)
 
         self.config_precos = {
-            "vlr_unit_est": tk.BooleanVar(value=True), 
-            "vlr_total_est": tk.BooleanVar(value=True), 
-            "vlr_unit_hom": tk.BooleanVar(value=True), 
-            "vlr_total_hom": tk.BooleanVar(value=True),
-            "media_orgao": tk.BooleanVar(value=True),
-            "media_geral": tk.BooleanVar(value=True),
-            "ultimo_orgao": tk.BooleanVar(value=True),
-            "ultimo_regiao": tk.BooleanVar(value=True)
+            "vlr_unit_est": tk.BooleanVar(value=True), "vlr_total_est": tk.BooleanVar(value=True), 
+            "vlr_unit_hom": tk.BooleanVar(value=True), "vlr_total_hom": tk.BooleanVar(value=True),
+            "media_orgao": tk.BooleanVar(value=True), "media_geral": tk.BooleanVar(value=True),
+            "ultimo_orgao": tk.BooleanVar(value=True), "ultimo_regiao": tk.BooleanVar(value=True)
         }
         
         self.lista_portais_comuns = ["Compras.gov.br", "Portal de Compras Públicas", "BLL", "Licitações-e", "BEC", "Licitar Digital", "AZ Informática", "BBMNET", "BNC", "Portal de Compras da Caixa", "Licitanet", "Abase Sistemas", "Compras RS", "Compras SC", "Compras GO", "Ammfoco", "TCE", "Prefeitura"]
@@ -277,279 +538,16 @@ class BuscadorPNCP(ctk.CTk):
         self.modalidades_map = {"Principais (Pregão, Dispensa, Conc.)": "", "1 - Leilão Eletrônico": "1", "2 - Diálogo Competitivo": "2", "3 - Concurso": "3", "4 - Concorrência Eletrônica": "4", "5 - Concorrência Presencial": "5", "6 - Pregão Eletrônico": "6", "7 - Pregão Presencial": "7", "8 - Dispensa de Licitação": "8", "9 - Inexigibilidade": "9", "10 - Manifestação de Interesse": "10", "11 - Pré-qualificação": "11", "12 - Credenciamento": "12", "13 - Leilão Presencial": "13"}
         self.lista_ufs = ["Todas", "AC", "AL", "AP", "AM", "BA", "CE", "DF", "ES", "GO", "MA", "MT", "MS", "MG", "PA", "PB", "PR", "PE", "PI", "RJ", "RN", "RS", "RO", "RR", "SC", "SP", "SE", "TO"]
         
-        self._renovar_sessao_http()
-        self.init_db()
         self.criar_menu_superior()
         self.criar_interface()
 
         self.bind('<Control-T>', self._abrir_prompt_terminal)
         self.bind('<Control-t>', self._abrir_prompt_terminal)
-        
         self.registrar_log("[SYSTEM] Sistema iniciado. UI Carregada.", apenas_terminal=True)
 
-    def registrar_log(self, mensagem, apenas_terminal=False):
-        hora_atual = datetime.datetime.now().strftime('%H:%M:%S')
-        linha_log = f"[{hora_atual}] {mensagem}"
-        print(linha_log.strip())
-        
-        self.historico_debug.append(linha_log)
-        if len(self.historico_debug) > 1500: self.historico_debug.pop(0)
-        
-        if not apenas_terminal and hasattr(self, "txt_logs"): 
-            self.after(0, lambda m=linha_log: [self.txt_logs.insert("end", f"{m}\n"), self.txt_logs.see("end")])
-            
-        if hasattr(self, "janela_terminal") and self.janela_terminal.winfo_exists():
-            self.after(0, lambda m=linha_log: [self.txt_terminal.insert("end", f"{m}\n"), self.txt_terminal.see("end")])
+        # Inicia a IA de Perfil em background (sem travar a tela)
+        threading.Thread(target=self._carregar_perfil_empresa_background, daemon=True).start()
 
-    def _abrir_prompt_terminal(self, event=None):
-        janela_senha = ctk.CTkToplevel(self)
-        janela_senha.title("Acesso Restrito - Manutenção")
-        janela_senha.geometry("350x180")
-        janela_senha.transient(self)
-        janela_senha.grab_set()
-
-        ctk.CTkLabel(janela_senha, text="🛠️ Modo de Suporte\n\nIntroduza a Senha Mestra:", font=("Arial", 12, "bold")).pack(pady=(20, 10))
-        ent_senha = ctk.CTkEntry(janela_senha, width=200, show="*")
-        ent_senha.pack(pady=5)
-        ent_senha.focus()
-
-        def validar(e=None):
-            if ent_senha.get() == "suporte@2026":
-                janela_senha.destroy()
-                self._abrir_terminal_logs()
-            else:
-                messagebox.showerror("Acesso Negado", "Palavra-passe incorreta.")
-                janela_senha.destroy()
-
-        ent_senha.bind("<Return>", validar)
-        ctk.CTkButton(janela_senha, text="Aceder", command=validar, fg_color="#c0392b", hover_color="#e74c3c").pack(pady=15)
-
-    def _abrir_terminal_logs(self):
-        if hasattr(self, "janela_terminal") and self.janela_terminal.winfo_exists():
-            self.janela_terminal.focus()
-            return
-
-        self.janela_terminal = ctk.CTkToplevel(self)
-        self.janela_terminal.title("Terminal de Logs Detalhado - Administrador")
-        self.janela_terminal.geometry("900x550")
-        self.janela_terminal.configure(fg_color="#0a0a0a")
-
-        lbl_titulo = ctk.CTkLabel(self.janela_terminal, text="Terminal de Depuração - Monitor de Backend", text_color="#2ecc71", font=("Consolas", 14, "bold"))
-        lbl_titulo.pack(anchor="w", padx=10, pady=5)
-
-        self.txt_terminal = ctk.CTkTextbox(self.janela_terminal, font=("Consolas", 11), fg_color="#121212", text_color="#2ecc71")
-        self.txt_terminal.pack(fill="both", expand=True, padx=10, pady=(0, 10))
-
-        if self.historico_debug:
-            self.txt_terminal.insert("end", "\n".join(self.historico_debug) + "\n")
-            self.txt_terminal.see("end")
-
-    def _renovar_sessao_http(self):
-        self.registrar_log("[NETWORK] SESSÃO HTTP RENOVADA (Kill Switch).", apenas_terminal=True)
-        self.http_session = requests.Session()
-        self.http_session.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)", "Accept": "application/json, text/plain, */*", "Referer": "https://pncp.gov.br/"})
-
-    def _get_com_retentativa(self, url, params, max_tentativas=5, timeout=15, tipo_operacao="busca"):
-        self.registrar_log(f"[HTTP GET] Iniciando request -> {url}", apenas_terminal=True)
-        self.registrar_log(f"           [PARAMS] {params}", apenas_terminal=True)
-        
-        time.sleep(0.15)
-        
-        for tentativa in range(1, max_tentativas + 1):
-            if (self.cancelar_busca if tipo_operacao == "busca" else self.cancelar_carga): return None
-            try: 
-                res = self.http_session.get(url, params=params, timeout=(3.0, timeout))
-                
-                if res.status_code == 429:
-                    tempo_espera = tentativa * 3 
-                    self.registrar_log(f"[HTTP 429] 🛑 RATE LIMIT DO PNCP ALCANÇADO! Pausando por {tempo_espera}s... (Tentativa {tentativa}/{max_tentativas})", apenas_terminal=True)
-                    self.registrar_log(f"🛑 O Governo limitou o acesso por excesso de requisições. O robô vai aguardar {tempo_espera}s...", apenas_terminal=False)
-                    for _ in range(int(tempo_espera * 10)):
-                        if (self.cancelar_busca if tipo_operacao == "busca" else self.cancelar_carga): return None
-                        time.sleep(0.1)
-                    continue 
-                
-                self.registrar_log(f"[HTTP {res.status_code}] <- Resposta recebida. (Tamanho: {len(res.content)} bytes)", apenas_terminal=True)
-                return res
-            except Exception as e:
-                if (self.cancelar_busca if tipo_operacao == "busca" else self.cancelar_carga): 
-                    self.registrar_log(f"[HTTP ABORT] Conexão cancelada pelo utilizador.", apenas_terminal=True)
-                    return None
-                if tentativa == max_tentativas: 
-                    self.registrar_log(f"[HTTP ERROR] Falha definitiva na URL: {url} | Erro: {e}", apenas_terminal=True)
-                    raise e
-                
-                self.registrar_log(f"⏳ Instabilidade na rede. Tentativa {tentativa}/{max_tentativas} aguardando...", apenas_terminal=False) 
-                self.registrar_log(f"[HTTP RETRY] Tentativa {tentativa}/{max_tentativas} falhou: {e}. Aguardando...", apenas_terminal=True)
-                for _ in range(20):
-                    if (self.cancelar_busca if tipo_operacao == "busca" else self.cancelar_carga): return None
-                    time.sleep(0.1)
-        return None
-
-    def init_db(self):
-        self.registrar_log("[SQLITE] Inicializando banco de dados...", apenas_terminal=True)
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            cursor.execute("""CREATE TABLE IF NOT EXISTS editais_itens (
-                id INTEGER PRIMARY KEY AUTOINCREMENT, 
-                orgao TEXT, uf TEXT, objeto_contrato TEXT, desc_item TEXT, 
-                quantidade REAL, vlr_unit_est TEXT, vlr_total_est TEXT, 
-                vlr_unit_hom TEXT, vlr_total_hom TEXT, data_publicacao TEXT, 
-                data_abertura TEXT, data_encerramento TEXT, cnpj TEXT, 
-                ano INTEGER, sequencial INTEGER, numero_compra TEXT, uasg TEXT, 
-                numero_item INTEGER, modalidade_id TEXT, modalidade_nome TEXT, 
-                portal_nome TEXT, data_cadastro TIMESTAMP DEFAULT CURRENT_TIMESTAMP, 
-                UNIQUE(cnpj, ano, sequencial, numero_item, desc_item) ON CONFLICT REPLACE
-            )""")
-            conn.commit()
-
-    def salvar_item_db(self, item_dict):
-        try:
-            with sqlite3.connect(self.db_path, timeout=10) as conn:
-                cursor = conn.cursor()
-                cursor.execute("""INSERT OR REPLACE INTO editais_itens (
-                    orgao, uf, objeto_contrato, desc_item, quantidade, vlr_unit_est, 
-                    vlr_total_est, vlr_unit_hom, vlr_total_hom, data_publicacao, 
-                    data_abertura, data_encerramento, cnpj, ano, sequencial, 
-                    numero_compra, uasg, numero_item, modalidade_id, modalidade_nome, portal_nome
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", (
-                    item_dict.get("Orgao"), item_dict.get("UF"), item_dict.get("ObjetoContrato"), 
-                    item_dict.get("DescItem"), item_dict.get("Qtd"), item_dict.get("Vlr Unit Est"), 
-                    item_dict.get("Vlr Total Est"), item_dict.get("Vlr Unit Hom"), item_dict.get("Vlr Total Hom"), 
-                    item_dict.get("Data Pub"), item_dict.get("Data Abertura"), item_dict.get("Data Encerramento"), 
-                    item_dict.get("CNPJ", ""), item_dict.get("Ano", 0), item_dict.get("Sequencial", 0), 
-                    item_dict.get("NumeroCompra", ""), item_dict.get("UASG", ""), item_dict.get("NumeroItem", 0), 
-                    item_dict.get("ModalidadeID", ""), item_dict.get("ModalidadeNome", ""), item_dict.get("PortalNome", "")
-                ))
-                conn.commit()
-        except Exception as e:
-            self.registrar_log(f"[SQLITE ERROR] Falha ao salvar item: {e}", apenas_terminal=True)
-
-    def contar_itens_db(self) -> int:
-        try:
-            with sqlite3.connect(self.db_path) as conn:
-                return conn.cursor().execute("SELECT COUNT(*) FROM editais_itens").fetchone()[0]
-        except: return 0
-
-    def formatar_moeda(self, valor):
-        if not valor: return "Não informado"
-        try:
-            val = float(valor)
-            return "Não informado" if val == 0.0 else f"R$ {val:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-        except: return "Não informado"
-
-    def formatar_data_api(self, data_str):
-        try:
-            p = data_str.strip().split("/")
-            if len(p) == 3: return f"{p[2]}{p[1].zfill(2)}{p[0].zfill(2)}"
-        except: pass
-        return data_str
-
-    def _obter_historico_precos(self, desc_item, orgao, uf_atual):
-        cache_key = (desc_item, orgao, uf_atual)
-        if hasattr(self, 'cache_historico') and cache_key in self.cache_historico:
-            return self.cache_historico[cache_key]
-        
-        try:
-            um_ano_atras = (datetime.datetime.now() - datetime.timedelta(days=365)).strftime("%Y-%m-%d")
-            with sqlite3.connect(self.db_path) as conn:
-                cursor = conn.cursor()
-                cursor.execute("SELECT orgao, uf, vlr_unit_hom FROM editais_itens WHERE desc_item = ? AND data_publicacao >= ? ORDER BY data_publicacao DESC", (desc_item, um_ano_atras))
-                linhas = cursor.fetchall()
-            
-            soma_orgao, qtd_orgao = 0.0, 0
-            soma_geral, qtd_geral = 0.0, 0
-            ultimo_orgao = "Sem Histórico"
-            ultimo_regiao = "Sem Histórico"
-            
-            for row in linhas:
-                orgao_db, uf_db, vlr_str = row[0], row[1], row[2]
-                if not vlr_str or vlr_str == "Não informado": continue
-                
-                try: val_float = float(vlr_str.replace("R$ ", "").replace(".", "").replace(",", "."))
-                except: continue
-                
-                if val_float <= 0: continue
-                
-                if orgao_db == orgao:
-                    soma_orgao += val_float
-                    qtd_orgao += 1
-                    if ultimo_orgao == "Sem Histórico": ultimo_orgao = self.formatar_moeda(val_float)
-                else:
-                    soma_geral += val_float
-                    qtd_geral += 1
-                    
-                if uf_db == uf_atual and ultimo_regiao == "Sem Histórico":
-                    ultimo_regiao = self.formatar_moeda(val_float)
-                    
-            media_org = self.formatar_moeda(soma_orgao / qtd_orgao) if qtd_orgao > 0 else "Sem Histórico"
-            media_ger = self.formatar_moeda(soma_geral / qtd_geral) if qtd_geral > 0 else "Sem Histórico"
-            
-            if not hasattr(self, 'cache_historico'): self.cache_historico = {}
-            retorno = (media_org, media_ger, ultimo_orgao, ultimo_regiao)
-            self.cache_historico[cache_key] = retorno
-            return retorno
-        except Exception as e:
-            self.registrar_log(f"[DB] Erro ao calcular histórico: {e}", apenas_terminal=True)
-            return "Sem Histórico", "Sem Histórico", "Sem Histórico", "Sem Histórico"
-
-    def _sugerir_termos_cnae(self):
-        if not hasattr(self, 'cnpj_ativo') or not self.cnpj_ativo:
-            messagebox.showwarning("Aviso", "Nenhum CNPJ registado encontrado na sessão.")
-            return
-
-        cnpj_limpo = "".join(filter(str.isdigit, self.cnpj_ativo))
-        self.btn_cnae.configure(text="A procurar...", state="disabled")
-        self.update()
-
-        def _thread_cnae():
-            try:
-                self.registrar_log(f"[BRASIL API] Procurando dados do CNPJ {cnpj_limpo}...", apenas_terminal=True)
-                url = f"https://brasilapi.com.br/api/cnpj/v1/{cnpj_limpo}"
-                res = requests.get(url, timeout=10)
-                
-                if res.status_code == 404:
-                    self.after(0, lambda: messagebox.showerror("Erro", "CNPJ não encontrado na base da Receita Federal."))
-                    return
-                elif res.status_code != 200:
-                    self.after(0, lambda: messagebox.showerror("Erro", "O serviço da BrasilAPI está temporariamente indisponível."))
-                    return
-
-                dados = res.json()
-                descricoes = [dados.get("cnae_fiscal_descricao", "")]
-                
-                for cnae_sec in dados.get("cnaes_secundarios", []):
-                    descricoes.append(cnae_sec.get("descricao", ""))
-
-                palavras_ignoradas = {"comercio", "varejista", "atacadista", "de", "e", "artigos", "servicos", "manutencao", "reparacao", "fabricacao", "para", "em", "geral", "outros", "outras", "nao", "especificados", "anteriormente", "uso", "pecas", "acessorios", "instalacao"}
-                
-                palavras_chave = []
-                for desc in descricoes:
-                    if not desc: continue
-                    palavras = normalizar_texto(desc).split()
-                    for p in palavras:
-                        p_limpa = re.sub(r'[^a-z]', '', p)
-                        if len(p_limpa) > 2 and p_limpa not in palavras_ignoradas and p_limpa not in palavras_chave:
-                            palavras_chave.append(p_limpa)
-
-                termos_sugeridos = ", ".join(palavras_chave[:8])
-                
-                if termos_sugeridos:
-                    self.after(0, lambda: self.ent_termo.delete(0, 'end'))
-                    self.after(0, lambda: self.ent_termo.insert(0, termos_sugeridos))
-                    self.registrar_log(f"[CNAE IA] Termos extraídos: {termos_sugeridos}", apenas_terminal=True)
-                else:
-                    self.after(0, lambda: messagebox.showinfo("CNAE", "Não foi possível extrair palavras-chave comerciais úteis deste CNPJ."))
-
-            except Exception as e:
-                self.registrar_log(f"[CNAE ERROR] {e}", apenas_terminal=True)
-                self.after(0, lambda: messagebox.showerror("Erro de Conexão", "Não foi possível conectar à BrasilAPI para ler o CNAE."))
-            finally:
-                self.after(0, lambda: self.btn_cnae.configure(text="🎯 Sugerir Termos (CNAE)", state="normal"))
-
-        threading.Thread(target=_thread_cnae, daemon=True).start()
-
-    # --- FUNÇÕES DE MENU E INTERFACE RESTAURADAS ---
     def criar_menu_superior(self):
         self.menubar = tk.Menu(self)
         self.menu_opcoes = tk.Menu(self.menubar, tearoff=0)
@@ -561,6 +559,24 @@ class BuscadorPNCP(ctk.CTk):
         self.menu_sync.add_command(label="Parar Atualização", command=self.parar_carga_background, state="disabled")
         self.menubar.add_cascade(label="Atualização", menu=self.menu_sync)
         self.config(menu=self.menubar)
+
+    def abrir_menu_configuracao(self):
+        janela_config = ctk.CTkToplevel(self)
+        janela_config.title("Configurar Colunas de Preço")
+        janela_config.geometry("380x350")
+        janela_config.transient(self) 
+        janela_config.grab_set() 
+        lbl_titulo = ctk.CTkLabel(janela_config, text="Selecione as colunas a apresentar:", font=("Arial", 12, "bold"))
+        lbl_titulo.pack(pady=(15, 10))
+        ctk.CTkCheckBox(janela_config, text="Valor Unitário Estimado", variable=self.config_precos["vlr_unit_est"]).pack(anchor="w", padx=40, pady=5)
+        ctk.CTkCheckBox(janela_config, text="Valor Total Estimado", variable=self.config_precos["vlr_total_est"]).pack(anchor="w", padx=40, pady=5)
+        ctk.CTkCheckBox(janela_config, text="Valor Unitário Homologado", variable=self.config_precos["vlr_unit_hom"]).pack(anchor="w", padx=40, pady=5)
+        ctk.CTkCheckBox(janela_config, text="Valor Total Homologado", variable=self.config_precos["vlr_total_hom"]).pack(anchor="w", padx=40, pady=5)
+        ctk.CTkCheckBox(janela_config, text="Média do Órgão (Últ. 12 meses)", variable=self.config_precos["media_orgao"]).pack(anchor="w", padx=40, pady=5)
+        ctk.CTkCheckBox(janela_config, text="Média Geral (Últ. 12 meses)", variable=self.config_precos["media_geral"]).pack(anchor="w", padx=40, pady=5)
+        ctk.CTkCheckBox(janela_config, text="Último Preço Vencedor (Próprio Órgão)", variable=self.config_precos["ultimo_orgao"]).pack(anchor="w", padx=40, pady=5)
+        ctk.CTkCheckBox(janela_config, text="Último Preço Vencedor (Região/UF)", variable=self.config_precos["ultimo_regiao"]).pack(anchor="w", padx=40, pady=5)
+        ctk.CTkButton(janela_config, text="Aplicar e Fechar", command=lambda: [self.aplicar_colunas_grid(), janela_config.destroy()]).pack(pady=20)
 
     def set_estado_menu_carga(self, em_andamento: bool):
         self.is_carga_running = em_andamento
@@ -634,8 +650,8 @@ class BuscadorPNCP(ctk.CTk):
         for portal in self.lista_portais_comuns: ctk.CTkCheckBox(frame_scroll_portais, text=portal, variable=vars_portais_carga[portal], command=_chk_ind_click).pack(anchor="w", padx=15, pady=2)
 
         def processar_inicio():
-            d_ini = self.formatar_data_api(ent_dt_ini.get().strip())
-            d_fim = self.formatar_data_api(ent_dt_fim.get().strip())
+            d_ini = Utils.formatar_data_api(ent_dt_ini.get().strip())
+            d_fim = Utils.formatar_data_api(ent_dt_fim.get().strip())
             uf = combo_uf.get()
             cat_id = self.categorias_map.get(combo_cat.get())
             mod_id = self.modalidades_map.get(combo_mod.get())
@@ -679,15 +695,9 @@ class BuscadorPNCP(ctk.CTk):
         self.lbl_termo = ctk.CTkLabel(self.frame_busca, text="Produto/Serviço (Termo de busca):", font=("Arial", 12, "bold"))
         self.lbl_termo.grid(row=0, column=0, sticky="w", padx=5, pady=5)
 
-        self.frame_termo = ctk.CTkFrame(self.frame_busca, fg_color="transparent")
-        self.frame_termo.grid(row=0, column=1, columnspan=2, sticky="we", padx=5, pady=5)
-        
-        self.ent_termo = ctk.CTkEntry(self.frame_termo, width=280, placeholder_text="Deixe vazio para extrair todo o Edital")
-        self.ent_termo.pack(side="left", fill="x", expand=True, padx=(0, 5))
+        self.ent_termo = ctk.CTkEntry(self.frame_busca, width=350, placeholder_text="Deixe vazio para extrair todo o Edital")
+        self.ent_termo.grid(row=0, column=1, columnspan=2, sticky="we", padx=5, pady=5)
         self.ent_termo.bind("<Return>", lambda e: self.iniciar_busca())
-        
-        self.btn_cnae = ctk.CTkButton(self.frame_termo, text="🎯 Sugerir Termos (CNAE)", fg_color="#27ae60", hover_color="#2ecc71", width=140, command=self._sugerir_termos_cnae)
-        self.btn_cnae.pack(side="left")
 
         self.lbl_alvo = ctk.CTkLabel(self.frame_busca, text="Onde buscar o termo:")
         self.lbl_alvo.grid(row=0, column=3, sticky="e", padx=5, pady=5)
@@ -793,6 +803,9 @@ class BuscadorPNCP(ctk.CTk):
         self.tree.heading("data_abertura", text="Abertura")
         self.tree.heading("data_encerramento", text="Encerramento")
 
+        # Flag de Aderência CNAE Visual (Fundo Verde Claro)
+        self.tree.tag_configure('aderente', background='#d4efdf')
+
         for col in colunas:
             self.tree.heading(col, text=self.tree.heading(col)["text"], command=lambda c=col: self._ordenar_coluna(c, False))
 
@@ -875,24 +888,6 @@ class BuscadorPNCP(ctk.CTk):
         colunas_visiveis.extend(["data", "data_abertura", "data_encerramento"])
         self.tree.configure(displaycolumns=colunas_visiveis)
 
-    def abrir_menu_configuracao(self):
-        janela_config = ctk.CTkToplevel(self)
-        janela_config.title("Configurar Colunas de Preço")
-        janela_config.geometry("380x350")
-        janela_config.transient(self) 
-        janela_config.grab_set() 
-        lbl_titulo = ctk.CTkLabel(janela_config, text="Selecione as colunas a apresentar:", font=("Arial", 12, "bold"))
-        lbl_titulo.pack(pady=(15, 10))
-        ctk.CTkCheckBox(janela_config, text="Valor Unitário Estimado", variable=self.config_precos["vlr_unit_est"]).pack(anchor="w", padx=40, pady=5)
-        ctk.CTkCheckBox(janela_config, text="Valor Total Estimado", variable=self.config_precos["vlr_total_est"]).pack(anchor="w", padx=40, pady=5)
-        ctk.CTkCheckBox(janela_config, text="Valor Unitário Homologado", variable=self.config_precos["vlr_unit_hom"]).pack(anchor="w", padx=40, pady=5)
-        ctk.CTkCheckBox(janela_config, text="Valor Total Homologado", variable=self.config_precos["vlr_total_hom"]).pack(anchor="w", padx=40, pady=5)
-        ctk.CTkCheckBox(janela_config, text="Média do Órgão (Últ. 12 meses)", variable=self.config_precos["media_orgao"]).pack(anchor="w", padx=40, pady=5)
-        ctk.CTkCheckBox(janela_config, text="Média Geral (Últ. 12 meses)", variable=self.config_precos["media_geral"]).pack(anchor="w", padx=40, pady=5)
-        ctk.CTkCheckBox(janela_config, text="Último Preço Vencedor (Próprio Órgão)", variable=self.config_precos["ultimo_orgao"]).pack(anchor="w", padx=40, pady=5)
-        ctk.CTkCheckBox(janela_config, text="Último Preço Vencedor (Região/UF)", variable=self.config_precos["ultimo_regiao"]).pack(anchor="w", padx=40, pady=5)
-        ctk.CTkButton(janela_config, text="Aplicar e Fechar", command=lambda: [self.aplicar_colunas_grid(), janela_config.destroy()]).pack(pady=20)
-
     def _on_chk_todos_portais_click(self):
         if self.vars_portais["Todos"].get():
             for p in self.lista_portais_comuns: self.vars_portais[p].set(False)
@@ -959,7 +954,9 @@ class BuscadorPNCP(ctk.CTk):
             self.item_selecionado_doc = (cnpj, ano, seq)
             self.btn_arquivos.configure(state="normal")
             
-            texto_exibicao = f"🏢 ÓRGÃO: {orgao} ({uf})   |   🌐 PORTAL: {portal}\n📄 EDITAL: {edital_resumo}  |  ⚖️ MODALIDADE: {mod_nome}  |  🔗 Link: https://pncp.gov.br/app/editais/{cnpj}/{ano}/{seq}\n⏰ DISPUTA: Abertura em {data_abertura} - Encerramento em {data_encerramento}\n📊 PREÇO MÉDIO: No Órgão ({media_org})  |  Geral ({media_ger})\n🏆 ÚLTIMO VENCEDOR: No Órgão ({ult_org})  |  Na Região/UF ({ult_reg})\n🎯 OBJETO GERAL: {objeto_geral}\n📦 DESCRIÇÃO DO ITEM: {desc_item_completo}"
+            aderencia_msg = "\n\n💡 PRODUTO ADERENTE: Este item tem alta probabilidade de corresponder aos serviços do seu CNPJ!" if desc_item_completo.startswith("⭐") else ""
+
+            texto_exibicao = f"🏢 ÓRGÃO: {orgao} ({uf})   |   🌐 PORTAL: {portal}\n📄 EDITAL: {edital_resumo}  |  ⚖️ MODALIDADE: {mod_nome}  |  🔗 Link: https://pncp.gov.br/app/editais/{cnpj}/{ano}/{seq}\n⏰ DISPUTA: Abertura em {data_abertura} - Encerramento em {data_encerramento}\n📊 PREÇO MÉDIO: No Órgão ({media_org})  |  Geral ({media_ger})\n🏆 ÚLTIMO VENCEDOR: No Órgão ({ult_org})  |  Na Região/UF ({ult_reg})\n🎯 OBJETO GERAL: {objeto_geral}\n📦 DESCRIÇÃO DO ITEM: {desc_item_completo}{aderencia_msg}"
             self.txt_detalhes.configure(state="normal")
             self.txt_detalhes.delete("1.0", "end")
             self.txt_detalhes.insert("end", texto_exibicao)
@@ -1006,6 +1003,9 @@ class BuscadorPNCP(ctk.CTk):
             ctk.CTkLabel(frame_item, text=f"[{tipo}] {titulo}", font=("Arial", 11, "bold"), text_color="#2c3e50", anchor="w", justify="left", wraplength=550).pack(side="left", padx=10, pady=10, fill="x", expand=True)
             if url_doc: ctk.CTkButton(frame_item, text="Baixar", width=100, fg_color="#2980b9", command=lambda u=url_doc: webbrowser.open(u)).pack(side="right", padx=10, pady=10)
 
+    # ---------------------------------------------------------
+    # OPERAÇÕES DE BUSCA E SINCRONIZAÇÃO
+    # ---------------------------------------------------------
     def _executar_carga_base_thread(self, data_inicio, data_fim, categoria_id, modalidade_id, uf_selecionada, portais_selecionados):
         if self.mostrar_carga_no_grid: self.after(0, self._limpar_tabela)
         url_base = "https://pncp.gov.br/api/consulta/v1/contratacoes/publicacao"
@@ -1051,26 +1051,26 @@ class BuscadorPNCP(ctk.CTk):
             
         self.cancelar_busca = False
         self.mostrar_carga_no_grid = False 
-        self.cache_historico = {} 
+        self.db.limpar_cache()
         self.btn_buscar.configure(text="⏹ Parar Busca", fg_color="#e74c3c", hover_color="#c0392b", command=self.cancelar_busca_manual)
 
-        if self.is_carga_running:
-            self.chk_base_local.select()
-            self.chk_base_local.configure(state="disabled")
-            self.lbl_status.configure(text="Busca Local forçada (Atualização em massa em andamento)...", text_color="#f39c12")
-            threading.Thread(target=self._buscar_local_db_thread, args=(termo, self.combo_uf.get(), self.modalidades_map.get(self.combo_modalidade.get()), self.combo_alvo.get(), self.obter_portais_selecionados(), edital_busca, uasg_busca), daemon=True).start()
-        elif self.chk_base_local.get() == 1:
-            self.lbl_status.configure(text="Consultando Base Local...", text_color="#f39c12")
+        if self.is_carga_running or self.chk_base_local.get() == 1:
+            if self.is_carga_running:
+                self.chk_base_local.select()
+                self.chk_base_local.configure(state="disabled")
+                self.lbl_status.configure(text="Busca Local forçada (Atualização em massa em andamento)...", text_color="#f39c12")
+            else:
+                self.lbl_status.configure(text="Consultando Base Local...", text_color="#f39c12")
             threading.Thread(target=self._buscar_local_db_thread, args=(termo, self.combo_uf.get(), self.modalidades_map.get(self.combo_modalidade.get()), self.combo_alvo.get(), self.obter_portais_selecionados(), edital_busca, uasg_busca), daemon=True).start()
         else:
             self.lbl_status.configure(text="Consultando API do PNCP...", text_color="#f39c12")
-            threading.Thread(target=self._buscar_api_pncp_thread, args=(termo, self.formatar_data_api(self.ent_data_ini.get().strip()), self.formatar_data_api(self.ent_data_fim.get().strip()), self.combo_status.get(), self.modalidades_map.get(self.combo_modalidade.get()), self.combo_uf.get(), self.combo_alvo.get(), self.obter_portais_selecionados(), edital_busca, uasg_busca), daemon=True).start()
+            threading.Thread(target=self._buscar_api_pncp_thread, args=(termo, Utils.formatar_data_api(self.ent_data_ini.get().strip()), Utils.formatar_data_api(self.ent_data_fim.get().strip()), self.combo_status.get(), self.modalidades_map.get(self.combo_modalidade.get()), self.combo_uf.get(), self.combo_alvo.get(), self.obter_portais_selecionados(), edital_busca, uasg_busca), daemon=True).start()
 
     def _buscar_local_db_thread(self, termo, uf_selecionada, modalidade_id, alvo_busca, portais_selecionados, edital_busca, uasg_busca):
         self.after(0, self._limpar_tabela)
         self.after(0, lambda: [self.txt_detalhes.configure(state="normal"), self.txt_detalhes.delete("1.0", "end"), self.txt_detalhes.configure(state="disabled"), self.btn_arquivos.configure(state="disabled")])
         
-        grupos_busca = extrair_grupos_radicais(termo)
+        grupos_busca = Utils.extrair_grupos_radicais(termo)
         count = 0
         self.registrar_log("🔎 Buscando na Base Local...")
 
@@ -1085,18 +1085,14 @@ class BuscadorPNCP(ctk.CTk):
         uasg_limpa = "".join(filter(str.isalnum, uasg_busca)).lower()
 
         try:
-            with sqlite3.connect(self.db_path) as conn:
-                cursor = conn.cursor()
-                sql, params = "SELECT orgao, uf, objeto_contrato, desc_item, quantidade, vlr_unit_est, vlr_total_est, vlr_unit_hom, vlr_total_hom, data_publicacao, data_abertura, data_encerramento, cnpj, ano, sequencial, numero_compra, uasg, modalidade_nome, portal_nome FROM editais_itens WHERE 1=1", []
-                if uf_selecionada != "Todas": sql += " AND uf = ?"; params.append(uf_selecionada)
-                if modalidade_id: sql += " AND modalidade_id = ?"; params.append(modalidade_id)
-                if portais_selecionados:
-                    sql += f" AND ({' OR '.join(['portal_nome LIKE ?' for _ in portais_selecionados])})"
-                    for p in portais_selecionados: params.append(f"%{p}%")
-                
-                self.registrar_log(f"[SQL EXEC] Query: {sql} | Params: {params}", apenas_terminal=True)
-                cursor.execute(sql, params)
-                linhas = cursor.fetchall()
+            sql, params = "SELECT orgao, uf, objeto_contrato, desc_item, quantidade, vlr_unit_est, vlr_total_est, vlr_unit_hom, vlr_total_hom, data_publicacao, data_abertura, data_encerramento, cnpj, ano, sequencial, numero_compra, uasg, modalidade_nome, portal_nome FROM editais_itens WHERE 1=1", []
+            if uf_selecionada != "Todas": sql += " AND uf = ?"; params.append(uf_selecionada)
+            if modalidade_id: sql += " AND modalidade_id = ?"; params.append(modalidade_id)
+            if portais_selecionados:
+                sql += f" AND ({' OR '.join(['portal_nome LIKE ?' for _ in portais_selecionados])})"
+                for p in portais_selecionados: params.append(f"%{p}%")
+            
+            linhas = self.db.executar_leitura(sql, params)
             
             for row in linhas:
                 if self.cancelar_busca: break
@@ -1117,12 +1113,12 @@ class BuscadorPNCP(ctk.CTk):
                     if uasg_limpa not in texto_orgao: continue
                 
                 texto_alvo = row[3] if alvo_busca == "Apenas no Item" else (row[2] if alvo_busca == "Apenas no Objeto do Edital" else f"{row[3]} {row[2]}")
-                if not texto_atende_busca(texto_alvo, grupos_busca): continue
+                if not Utils.texto_atende_busca(texto_alvo, grupos_busca): continue
                 
                 edital_exibicao = str(row[15]).split('|')[0] if '|' in str(row[15]) else str(row[15])
                 if not edital_exibicao: edital_exibicao = str(row[14])
                 
-                media_org, media_ger, ult_org, ult_reg = self._obter_historico_precos(row[3], row[0], row[1])
+                media_org, media_ger, ult_org, ult_reg = self.db.obter_historico_precos(row[3], row[0], row[1])
                 
                 self.after(0, lambda r=row, ed_ex=edital_exibicao, mo=media_org, mg=media_ger, uo=ult_org, ur=ult_reg: self._adicionar_item_tabela(r[0], r[1], r[18], f"{ed_ex}/{r[13]}", r[3], r[4], r[5], r[6], r[7], r[8], mo, mg, uo, ur, r[9], r[10], r[11], r[12], r[13], r[14], r[17], r[2]))
                 count += 1
@@ -1135,7 +1131,7 @@ class BuscadorPNCP(ctk.CTk):
         self.after(0, lambda: [self.txt_detalhes.configure(state="normal"), self.txt_detalhes.delete("1.0", "end"), self.txt_detalhes.configure(state="disabled"), self.btn_arquivos.configure(state="disabled")])
         self.resultados_pncp = []
         try:
-            grupos_busca = extrair_grupos_radicais(termo)
+            grupos_busca = Utils.extrair_grupos_radicais(termo)
             self.registrar_log("🔎 Iniciando busca no PNCP Web...")
             url_base = "https://pncp.gov.br/api/consulta/v1/contratacoes/proposta" if status_busca == "A Receber/Recebendo Proposta" else "https://pncp.gov.br/api/consulta/v1/contratacoes/publicacao"
             params_base = {"dataFinal": data_fim} if status_busca == "A Receber/Recebendo Proposta" else {"dataInicial": data_inicio, "dataFinal": data_fim}
@@ -1218,8 +1214,8 @@ class BuscadorPNCP(ctk.CTk):
             data_pub = str(contrato.get("dataPublicacaoPncp", ""))[:10]
             objeto_contrato = contrato.get("objeto", "")
 
-            data_abertura = formatar_data_hora(contrato.get("dataAberturaProposta"))
-            data_encerramento = formatar_data_hora(contrato.get("dataEncerramentoProposta"))
+            data_abertura = Utils.formatar_data_hora(contrato.get("dataAberturaProposta"))
+            data_encerramento = Utils.formatar_data_hora(contrato.get("dataEncerramentoProposta"))
 
             if cnpj and ano and seq:
                 pag_item = 1
@@ -1239,27 +1235,26 @@ class BuscadorPNCP(ctk.CTk):
                             
                             texto_alvo = desc_item if alvo_busca == "Apenas no Item" else (objeto_contrato if alvo_busca == "Apenas no Objeto do Edital" else f"{desc_item} {objeto_contrato}")
                             
-                            if grupos_busca and not texto_atende_busca(texto_alvo, grupos_busca): continue
+                            if grupos_busca and not Utils.texto_atende_busca(texto_alvo, grupos_busca): continue
 
                             chave_u = f"{cnpj}_{ano}_{seq}_{num_item}"
                             if chave_u not in chaves_cadastradas:
                                 chaves_cadastradas.add(chave_u)
                                 qtd, v_u_est, v_t_est, v_u_hom, v_t_hom = float(it.get("quantidade", 1)), it.get("valorUnitarioEstimado"), it.get("valorTotalEstimado"), it.get("valorUnitarioHomologado"), it.get("valorTotalHomologado") or it.get("valorTotal")
                                 
-                                reg = {"Orgao": orgao, "UF": uf, "ObjetoContrato": objeto_contrato, "DescItem": desc_item, "Qtd": qtd, "Vlr Unit Est": self.formatar_moeda(v_u_est), "Vlr Total Est": self.formatar_moeda(v_t_est), "Vlr Unit Hom": self.formatar_moeda(v_u_hom), "Vlr Total Hom": self.formatar_moeda(v_t_hom), "Data Pub": data_pub, "Data Abertura": data_abertura, "Data Encerramento": data_encerramento, "CNPJ": cnpj, "Ano": ano, "Sequencial": seq, "NumeroCompra": f"{numero_compra}|{numero_processo}", "UASG": codigo_unidade, "NumeroItem": num_item, "ModalidadeID": str(cod_modalidade), "ModalidadeNome": mod_nome, "PortalNome": portal_nome}
+                                reg = {"Orgao": orgao, "UF": uf, "ObjetoContrato": objeto_contrato, "DescItem": desc_item, "Qtd": qtd, "Vlr Unit Est": Utils.formatar_moeda(v_u_est), "Vlr Total Est": Utils.formatar_moeda(v_t_est), "Vlr Unit Hom": Utils.formatar_moeda(v_u_hom), "Vlr Total Hom": Utils.formatar_moeda(v_t_hom), "Data Pub": data_pub, "Data Abertura": data_abertura, "Data Encerramento": data_encerramento, "CNPJ": cnpj, "Ano": ano, "Sequencial": seq, "NumeroCompra": f"{numero_compra}|{numero_processo}", "UASG": codigo_unidade, "NumeroItem": num_item, "ModalidadeID": str(cod_modalidade), "ModalidadeNome": mod_nome, "PortalNome": portal_nome}
                                 
-                                media_org, media_ger, ult_org, ult_reg = self._obter_historico_precos(desc_item, orgao, uf)
+                                media_org, media_ger, ult_org, ult_reg = self.db.obter_historico_precos(desc_item, orgao, uf)
 
                                 if tipo_operacao == "busca" or (tipo_operacao == "carga" and self.mostrar_carga_no_grid):
                                     self.resultados_pncp.append(reg)
-                                    
                                     edital_exibicao = numero_compra if numero_compra else str(seq)
                                     if numero_processo and numero_processo != numero_compra: edital_exibicao += f" (Proc: {numero_processo})"
                                     
                                     self.after(0, lambda r=reg, ed_ex=edital_exibicao, mo=media_org, mg=media_ger, uo=ult_org, ur=ult_reg: self._adicionar_item_tabela(r["Orgao"], r["UF"], r["PortalNome"], f"{ed_ex}/{r['Ano']}", r["DescItem"], r["Qtd"], r["Vlr Unit Est"], r["Vlr Total Est"], r["Vlr Unit Hom"], r["Vlr Total Hom"], mo, mg, uo, ur, r["Data Pub"], r["Data Abertura"], r["Data Encerramento"], r["CNPJ"], r["Ano"], r["Sequencial"], r["ModalidadeNome"], r["ObjetoContrato"]))
                                     self.after(0, lambda: self.tree.yview_moveto(1))
                                     
-                                self.salvar_item_db(reg)
+                                self.db.salvar_item_edital(reg)
                                 itens_salvos_count += 1
                                 
                                 if tipo_operacao == "carga" and itens_salvos_count % 50 == 0:
@@ -1271,6 +1266,19 @@ class BuscadorPNCP(ctk.CTk):
                         self.registrar_log(f"⚠️ Aviso: Falha ao baixar itens do edital {seq}/{ano}. Saltando...")
                         break
         return itens_salvos_count
+
+    def _adicionar_item_tabela(self, orgao, uf, portal, edital, desc, qtd, unit_est, total_est, unit_hom, total_hom, media_orgao, media_geral, ult_org, ult_reg, data_pub, data_abertura, data_encerramento, cnpj, ano, seq, mod_nome, obj_contrato):
+        tags = ()
+        texto_alvo = Utils.normalizar_texto(f"{desc} {obj_contrato}")
+        
+        # Inteligência CNAE: Adiciona uma Estrela e fundo Verde se for aderente
+        if hasattr(self, 'palavras_chave_empresa') and self.palavras_chave_empresa:
+            palavras_texto = set(re.findall(r'[a-z]+', texto_alvo))
+            if any(p in palavras_texto for p in self.palavras_chave_empresa):
+                tags = ('aderente',)
+                desc = f"⭐ {desc}"
+
+        self.tree.insert("", "end", values=(orgao, uf, portal, edital, desc, qtd, unit_est, total_est, unit_hom, total_hom, media_orgao, media_geral, ult_org, ult_reg, data_pub, data_abertura, data_encerramento, cnpj, ano, seq, mod_nome, obj_contrato), tags=tags)
 
     def _limpar_tabela(self):
         for row in self.tree.get_children(): self.tree.delete(row)
