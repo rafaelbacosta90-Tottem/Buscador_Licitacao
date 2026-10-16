@@ -20,6 +20,7 @@ import requests
 import hmac
 import hashlib
 import base64
+#import google.generativeai as genai
 
 # Importação da biblioteca de leitura de PDFs (Fallback se não instalada)
 try:
@@ -566,8 +567,23 @@ class BuscadorPNCP(ctk.CTk):
     def abrir_janela_analise(self):
         if not self.item_selecionado_doc: return
         cnpj, ano, seq = self.item_selecionado_doc
-        self.btn_analise.configure(text="A processar\n(Lendo PDFs...)", state="disabled")
-        threading.Thread(target=self._analisar_edital_thread, args=(cnpj, ano, seq), daemon=True).start()
+        
+        # 1. Feedback imediato na UI (Bloqueia o botão e muda de cor)
+        self.btn_analise.configure(text="⏳ A preparar IA...\n(Aguarde)", state="disabled", fg_color="#e17055")
+        
+        # 2. Envia para uma Thread que vai segurar o tempo ANTES de chamar a IA real
+        threading.Thread(target=self._iniciar_analise_com_delay, args=(cnpj, ano, seq), daemon=True).start()
+
+    def _iniciar_analise_com_delay(self, cnpj, ano, seq):
+        # Timeout de 2.5 segundos em background (não congela o programa)
+        self.registrar_log("⏳ A segurar requisição (Timeout de segurança)...", apenas_terminal=True)
+        time.sleep(2.5) 
+        
+        # Atualiza a UI para mostrar que a ação pesada começou
+        self.after(0, lambda: self.btn_analise.configure(text="🧠 Lendo PDFs e\nProcessando IA...", fg_color="#00cec9"))
+        
+        # Chama a função pesada original
+        self._analisar_edital_thread(cnpj, ano, seq)
 
     def _analisar_edital_thread(self, cnpj, ano, seq):
         try:
@@ -605,36 +621,10 @@ class BuscadorPNCP(ctk.CTk):
                     self.after(0, lambda: messagebox.showinfo("Análise", "Dados indisponíveis."))
                     return
 
-            texto_completo = f"{objeto} {info_comp} ".lower()
+            texto_completo = f"{objeto}\n{info_comp}\n"
             fonte_detalhe = "🌐 Resumo PNCP"
-            req_meepp = "⚖️ Ampla Concorrência (Não detectado no Resumo)"
-
-            # ETAPA 2: BUSCAR ITENS PARA VERIFICAR ME/EPP OFICIALMENTE
-            self.registrar_log("🤖 A verificar Itens e Cotas ME/EPP...")
-            url_itens = f"https://pncp.gov.br/api/pncp/v1/orgaos/{cnpj}/compras/{ano}/{seq}/itens"
-            res_itens = self._get_com_retentativa(url_itens, params={"pagina":1, "tamanhoPagina":50}, timeout=10, tipo_operacao="busca")
-            tem_me_epp = False
             
-            if res_itens and res_itens.status_code == 200:
-                itens_data = res_itens.json()
-                if isinstance(itens_data, dict): itens_data = itens_data.get("data", [])
-                elif not isinstance(itens_data, list): itens_data = []
-                
-                for it in itens_data:
-                    # Captura critério se não havia na raiz
-                    if it.get("criterioJulgamento", {}).get("nome") and julgamento == "N/I":
-                        julgamento = it.get("criterioJulgamento", {}).get("nome")
-                    
-                    # Verificação nativa da API se há restrição para pequena empresa
-                    if it.get("indicadorMeEpp") == True:
-                        tem_me_epp = True
-                        
-                    texto_completo += " " + (it.get("descricao", "") or "").lower()
-
-            if tem_me_epp:
-                req_meepp = "🎯 SIM (Foi detetado Item com Cota Exclusiva ME/EPP na API)"
-
-            # ETAPA 3: LISTAR ARQUIVOS E VARREDURA PROFUNDA (DOWNLOAD DO PDF DO EDITAL)
+            # ETAPA 2: LISTAR ARQUIVOS E VARREDURA PROFUNDA (DOWNLOAD DO PDF DO EDITAL)
             self.registrar_log("🤖 Procurando ficheiros e anexos do Edital...")
             url_arquivos = f"https://pncp.gov.br/api/pncp/v1/orgaos/{cnpj}/compras/{ano}/{seq}/arquivos"
             res_arq = self._get_com_retentativa(url_arquivos, params={"pagina":1, "tamanhoPagina":50}, timeout=10, tipo_operacao="busca")
@@ -644,14 +634,11 @@ class BuscadorPNCP(ctk.CTk):
 
             if res_arq and res_arq.status_code == 200:
                 dados_arq = res_arq.json()
-                
                 if isinstance(dados_arq, dict): arquivos_lista = dados_arq.get("data", [])
                 elif isinstance(dados_arq, list): arquivos_lista = dados_arq
                     
                 if HAS_PYPDF and arquivos_lista:
                     url_pdf_alvo = None
-                    
-                    # Procura pelo Edital ou Termo de Referência principal
                     for arq in arquivos_lista:
                         titulo = (arq.get("titulo", "")).lower()
                         tipo = (arq.get("tipoDocumentoNome", "")).lower()
@@ -666,98 +653,113 @@ class BuscadorPNCP(ctk.CTk):
                             if res_pdf.status_code == 200:
                                 pdf_file = io.BytesIO(res_pdf.content)
                                 leitor = pypdf.PdfReader(pdf_file)
-                                # Lê as primeiras 40 páginas (regras do edital)
-                                for i in range(min(40, len(leitor.pages))):
+                                for i in range(min(50, len(leitor.pages))): # Aumentado para 50 páginas
                                     ext = leitor.pages[i].extract_text()
                                     if ext: 
                                         pdf_texto_puro += f"--- PÁGINA {i+1} ---\n" + ext + "\n\n"
-                                texto_completo += " " + pdf_texto_puro.lower()
+                                texto_completo += "\n" + pdf_texto_puro
                                 fonte_detalhe += " + 📄 Varredura Profunda no PDF"
                         except Exception as epdf:
                             self.registrar_log(f"⚠️ Erro ao varrer PDF: {epdf}", apenas_terminal=True)
-                            pdf_texto_puro = "⚠️ Falha ao ler o conteúdo do PDF. O arquivo pode estar corrompido ou protegido."
-                elif not HAS_PYPDF:
-                    self.registrar_log("⚠️ Biblioteca 'pypdf' ausente. Ignorando Deep Scan.", apenas_terminal=True)
-                    fonte_detalhe += " (Instale: pip install pypdf)"
-                    pdf_texto_puro = "⚠️ A biblioteca 'pypdf' não está instalada no sistema. \nPara ativar a leitura de PDFs, abra o terminal e digite: pip install pypdf"
+                            pdf_texto_puro = "⚠️ Falha ao ler o conteúdo do PDF."
 
-            # --- INTELIGÊNCIA HEURÍSTICA: RADAR EXPANDIDO ---
-            req_amostra = "⚠️ EXIGIDA / APLICÁVEL" if re.search(r'\bamostra[s]?\b|\bprova de conceito\b|\bpoc\b|\bprotótipo\b', texto_completo) else "✅ Não detectada explicitamente"
-            req_garantia = "⚠️ EXIGIDA" if re.search(r'\bgarantia contratual\b|\bgarantia de execução\b|\bcaução\b|\bseguro-garantia\b|\bseguro garantia\b', texto_completo) else "✅ Não detectada explicitamente"
-            req_balanco = "⚠️ EXIGIDO" if re.search(r'\bbalanço patrimonial\b|\bíndices contábeis\b|\bcapacidade econômico-financeira\b|\bcapital social mínimo\b', texto_completo) else "✅ Não detectado explicitamente"
-            req_visita = "⚠️ OBRIGATÓRIA / RECOMENDADA" if re.search(r'\bvisita técnica\b|\bvistoria\b|\batestado de visita\b', texto_completo) else "✅ Não detectada"
-            req_certificacao = "📑 EXIGIDA (Verifique o edital)" if re.search(r'\banvisa\b|\binmetro\b|\bcrea\b|\bcrm\b|\bcrmv\b|\biso 9001\b|\bafe\b|\bautorização de funcionamento\b|\balvará sanitário\b', texto_completo) else "✅ Nenhuma certificação detectada"
-            req_subcontratacao = "⚠️ MENCIONADA (Verifique limites)" if re.search(r'\bsubcontratação\b|\bsubcontratar\b', texto_completo) else "✅ Não mencionada"
+            # =====================================================================
+            # ETAPA 3: ANÁLISE COM IA GENERATIVA (API REST DIRETA + RETRY)
+            # =====================================================================
+            CHAVE_GEMINI = "" # COLOQUE A SUA CHAVE AQUI
+            
+            if CHAVE_GEMINI:
+                self.registrar_log("🧠 Enviando texto para o Gemini 3.8 Flash via API REST...")
+                
+                try:
+                    url_ia = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-lite-latest:generateContent?key={CHAVE_GEMINI}"
+                    
+                    prompt = f"""
+                    Aja como um advogado especialista em Licitações Públicas no Brasil.
+                    Analise o texto do edital fornecido abaixo e extraia os pontos críticos com base nas informações literais encontradas.
+                    Formate a sua resposta em tópicos claros. Use emojis para ilustrar. 
+                    Se uma informação não estiver explícita, responda rigorosamente "Não mencionado no texto extraído".
+                    Não invente dados.
+                    
+                    Por favor, traga exatamente estes tópicos:
+                    - 📦 Objeto Resumido: (Qual é o principal foco da contratação em 2 frases?)
+                    - 📍 Local de Entrega/Execução: 
+                    - ⏳ Prazo de Entrega e Vigência:
+                    - 📦 Regime de Fornecimento: (Único, parcelado, contínuo ou sob demanda?)
+                    - 💸 Prazo e Condição de Pagamento:
+                    - 🧪 Exigência de Amostras:
+                    - 🛡️ Garantia Contratual: (Exige caução ou seguro-garantia?)
+                    - 💰 Qualificação Econômico-Financeira: (Exige balanço patrimonial ou capital mínimo?)
+                    - 🗺️ Vistoria/Visita Técnica:
+                    - 🏢 Participação Exclusiva ou Cotas para ME/EPP:
+                    - 📜 Certificações/Registros Específicos: (ANVISA, INMETRO, CREA, Alvarás, etc.)
+                    - 🤝 Subcontratação: (É permitida?)
 
-            if not tem_me_epp and re.search(r'\bexclusivo para me\b|\bepp\b|\bcota reservada\b|\blc 123\b|\blei complementar 123\b', texto_completo):
-                req_meepp = "🎯 SIM (Encontrado no texto do Edital/Resumo)"
-
-            # --- HEURÍSTICA DE LOGÍSTICA E PAGAMENTO ---
-            pag_match = re.search(r'(?:pagamento|pagos|pago|faturamento).*?(?:em|até|prazo de) (\d{1,3}\s*dias)', texto_completo)
-            if pag_match: 
-                req_pagamento = f"💸 ATÉ {pag_match.group(1).upper()}"
+                    --- TEXTO DO EDITAL PARA ANÁLISE ---
+                    {texto_completo[:80000]} 
+                    """
+                    
+                    payload = {"contents": [{"parts": [{"text": prompt}]}]}
+                    
+                    # Sistema de insistência automática (Retry Loop)
+                    max_tentativas_ia = 3
+                    resposta_ia = ""
+                    erro_txt = ""
+                    
+                    for tentativa in range(1, max_tentativas_ia + 1):
+                        res_ia = requests.post(url_ia, json=payload, timeout=60)
+                        
+                        if res_ia.status_code == 200:
+                            dados_ia = res_ia.json()
+                            resposta_ia = dados_ia.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "⚠️ Sem resposta extraída.")
+                            break # Sucesso, sai do loop!
+                            
+                        elif res_ia.status_code in [503, 429]:
+                            # Google sobrecarregado. Espera 4s, depois 8s, depois desiste.
+                            tempo_espera = tentativa * 4
+                            self.registrar_log(f"⚠️ Google sobrecarregado (Erro {res_ia.status_code}). Tentativa {tentativa}/{max_tentativas_ia}. Aguardando {tempo_espera}s...", apenas_terminal=True)
+                            self.after(0, lambda t=tentativa, te=tempo_espera: self.btn_analise.configure(text=f"⚠️ Google ocupado...\nRe-tentando em {te}s (T{t})", fg_color="#e17055"))
+                            time.sleep(tempo_espera)
+                            erro_txt = res_ia.text
+                        else:
+                            erro_txt = res_ia.text
+                            break # Erros definitivos (400, 403, 404), não adianta tentar de novo
+                    
+                    if resposta_ia:
+                        relatorio = f"🧠 ANÁLISE INTELIGENTE COM IA\n"
+                        relatorio += f"📡 FONTES ANALISADAS: {fonte_detalhe}\n"
+                        relatorio += "="*80 + "\n\n"
+                        relatorio += f"1️⃣ INFORMAÇÕES GERAIS E CONTRATUAIS\n"
+                        relatorio += f"• Amparo Legal (Lei): {amparo}\n"
+                        relatorio += f"• Modo de Disputa: {modo_disputa}\n"
+                        relatorio += f"• Critério de Julgamento: {julgamento}\n"
+                        relatorio += f"• Valor Total Estimado Global: {Utils.formatar_moeda(valor_total)}\n\n"
+                        relatorio += "-"*80 + "\n"
+                        relatorio += resposta_ia
+                        relatorio += "\n" + "="*80 + "\n\n"
+                    else:
+                        self.registrar_log(f"[GEMINI ERROR] HTTP {res_ia.status_code}: {erro_txt}", apenas_terminal=True)
+                        relatorio = f"⚠️ ERRO DA API GOOGLE (HTTP {res_ia.status_code}):\nOs servidores da Google estão com tráfego extremo neste momento.\n{erro_txt}"
+                        
+                except Exception as e_ia:
+                    self.registrar_log(f"[GEMINI ERROR] Falha na rede/IA: {e_ia}", apenas_terminal=True)
+                    relatorio = f"⚠️ ERRO AO CONECTAR COM A IA: {e_ia}"
             else:
-                pag_context = re.search(r'(?:prazo(?: para| de)? pagamento|pagamento efetuado|pagamento será)\s*(?:é|de|em|até|:)?\s*([^.]{5,80})', texto_completo)
-                if pag_context: req_pagamento = f"💸 \"...{pag_context.group(1).strip().capitalize()}...\""
-                else: req_pagamento = "💸 Regra padrão (Verificar TR completo)"
-
-            ent_match = re.search(r'(?:entrega|entregue|execução).*?(?:em|até|prazo de) (\d{1,3}\s*dias)', texto_completo)
-            if ent_match: 
-                req_prazo = f"⏳ ATÉ {ent_match.group(1).upper()}"
-            else:
-                ent_context = re.search(r'(?:prazo de entrega|entregue em|entregues em)\s*(?:é|de|em|até|:)?\s*([^.]{5,80})', texto_completo)
-                if ent_context: req_prazo = f"⏳ \"...{ent_context.group(1).strip().capitalize()}...\""
-                else: req_prazo = "⏳ Não explícito (Verificar TR)"
-
-            req_parcelada = "📦 SIM (Sob Demanda / Fracionada / Contínua)" if re.search(r'\bparcelada[s]?\b|\bsob demanda\b|\bconforme demanda\b|\bfracionada\b|\bcronograma\b|\bfornecimento contínuo\b', texto_completo) else "📦 Não mencionada (Presume-se entrega única)"
+                relatorio = "⚠️ CHAVE DO GEMINI NÃO CONFIGURADA."
+            # =====================================================================
+            # =====================================================================
             
-            local_context = re.search(r'(?:local de entrega|entregue no|entregue na|entregues na|entregues no|local da execução)\s*(?:é|será|:)?\s*([^.]{5,80})', texto_completo)
-            if local_context: req_local = f"📍 \"...{local_context.group(1).strip().capitalize()}...\""
-            else: req_local = "🏢 Sede do Órgão Contratante (Presumido)"
-
-            relatorio = f"📊 RELATÓRIO DE ANÁLISE INTELIGENTE DO EDITAL\n"
-            relatorio += f"📡 FONTES ANALISADAS: {fonte_detalhe}\n"
-            relatorio += "="*80 + "\n\n"
-            
-            relatorio += f"1️⃣ INFORMAÇÕES GERAIS E CONTRATUAIS\n"
-            relatorio += f"• Amparo Legal (Lei): {amparo}\n"
-            relatorio += f"• Modo de Disputa: {modo_disputa}\n"
-            relatorio += f"• Critério de Julgamento: {julgamento}\n"
-            relatorio += f"• Valor Total Estimado Global: {Utils.formatar_moeda(valor_total)}\n\n"
-            
-            relatorio += f"2️⃣ LOGÍSTICA E CONDIÇÕES DE PAGAMENTO\n"
-            relatorio += "-"*80 + "\n"
-            relatorio += f"• Prazo de Entrega: {req_prazo}\n"
-            relatorio += f"• Regime de Fornecimento: {req_parcelada}\n"
-            relatorio += f"• Local de Entrega: {req_local}\n"
-            relatorio += f"• Prazo de Recebimento/Pagamento: {req_pagamento}\n"
-            relatorio += "-"*80 + "\n\n"
-
-            relatorio += f"3️⃣ PONTOS CRÍTICOS DETECTADOS (Burocracia)\n"
-            relatorio += "-"*80 + "\n"
-            relatorio += f"🏢 Participação ME/EPP: {req_meepp}\n"
-            relatorio += f"🧪 Exigência de Amostras/POC: {req_amostra}\n"
-            relatorio += f"🛡️ Garantia Contratual: {req_garantia}\n"
-            relatorio += f"💰 Exigência de Balanço/Índices: {req_balanco}\n"
-            relatorio += f"🗺️ Vistoria/Visita Técnica: {req_visita}\n"
-            relatorio += f"📜 Certificações Específicas: {req_certificacao}\n"
-            relatorio += f"🤝 Subcontratação: {req_subcontratacao}\n"
-            relatorio += "-"*80 + "\n\n"
-            
-            relatorio += f"4️⃣ OBJETO DA CONTRATAÇÃO (Resumo Oficial)\n"
-            relatorio += f"{objeto}\n\n"
-            
-            relatorio += f"5️⃣ INFORMAÇÕES COMPLEMENTARES DA API\n"
-            relatorio += f"{info_comp}\n"
-            
-            # Envia as 3 variáveis (Relatório, Texto PDF e Arquivos) para a nova janela UI
             self.after(0, lambda: self.mostrar_janela_analise(relatorio, pdf_texto_puro, arquivos_lista))
 
         except Exception as e:
             self.registrar_log(f"[ANALISE ERROR] {e}", apenas_terminal=True)
             self.after(0, lambda erro=str(e): messagebox.showerror("Erro", f"Erro na análise: {erro}"))
         finally:
-            self.after(0, lambda: self.btn_analise.configure(text="🧠 Analisar Edital\n(Varredura Profunda)", state="normal"))
+            self.after(0, lambda: self.btn_analise.configure(
+                text="✨ Analisar com IA\n(Leitura Profunda)", 
+                state="normal", 
+                fg_color=self.cor_ia_normal
+            ))
 
     def mostrar_janela_analise(self, relatorio_texto, texto_pdf, arquivos):
         janela_an = ctk.CTkToplevel(self)
@@ -1145,9 +1147,17 @@ class BuscadorPNCP(ctk.CTk):
         )
         self.btn_arquivos.pack(side="right", padx=(5, 0))
 
+        # Botão com visual moderno estilo "Inteligência Artificial"
+        self.cor_ia_normal = "#6c5ce7" # Roxo moderno
+        self.cor_ia_hover = "#a29bfe"  # Roxo claro
+        
         self.btn_analise = ctk.CTkButton(
-            self.frame_detalhes, text="🧠 Analisar Edital\n(Varredura Profunda)", width=160, height=100,
-            fg_color="#8e44ad", hover_color="#732d91", state="disabled", font=("Arial", 12, "bold"), command=self.abrir_janela_analise
+            self.frame_detalhes, 
+            text="✨ Analisar com IA\n(Leitura Profunda)", 
+            width=160, height=100,
+            fg_color=self.cor_ia_normal, hover_color=self.cor_ia_hover, 
+            state="disabled", font=("Arial", 12, "bold"), 
+            command=self.abrir_janela_analise
         )
         self.btn_analise.pack(side="right", padx=(5, 0))
 
