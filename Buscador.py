@@ -13,6 +13,7 @@ import subprocess
 import uuid
 import traceback
 import platform
+import re
 import customtkinter as ctk
 import requests
 import hmac
@@ -25,8 +26,6 @@ ctk.set_default_color_theme("blue")
 
 def obter_caminho_recurso(caminho_relativo):
     """ Obtém o caminho absoluto do recurso, compatível com Nuitka, PyInstaller e Python normal """
-    # O getattr tenta procurar o '_MEIPASS' de forma segura. 
-    # Se não encontrar (no VS Code ou no Nuitka), usa o caminho padrão silenciosamente.
     base_path = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
     return os.path.join(base_path, caminho_relativo)
 
@@ -72,21 +71,19 @@ class BuscadorPNCP(ctk.CTk):
     def __init__(self):
         super().__init__()
 
-        self.versao_local = "8.14"
+        self.versao_local = "8.18"
         
         self.title(f"Buscador Multi-Portal de Licitações & Preços - Compras Públicas | Versão {self.versao_local}")
         self.geometry("1180x920")
         
-        try:
-            self.iconbitmap(obter_caminho_recurso("icone.ico"))
-        except:
-            pass
-        
+        try: self.iconbitmap(obter_caminho_recurso("icone.ico"))
+        except: pass
+
         # INSIRA AQUI AS SUAS URLs DA VERCEL
         self.url_api_versao = "https://meu-validador-licencas.vercel.app/api/versao"
         self.url_api_licenca = "https://meu-validador-licencas.vercel.app/api/valida"
         
-        self.chave_seguranca = b'kM7hQ7uX1x4qW8zF3rN9mT2vP5yC8aD4gG6jH9kL1sM='  
+        self.chave_seguranca = b'kM7hQ7uX1x4qW8zF3rN9mT2vP5yC8aD4gG6jH9kL1sM=' 
         self.db_path = "licitacoes_pncp_v10.db"
 
         self.withdraw()
@@ -98,20 +95,20 @@ class BuscadorPNCP(ctk.CTk):
         
         self.item_selecionado_doc = None
         self.resultados_pncp = []
-        
         self.historico_debug = []
+        self.cache_historico = {}
 
         self.after(200, self._rotina_de_arranque)
 
     def _rotina_de_arranque(self):
         if not self.verificar_versao_inicial(): return 
         self.setup_db_licenca()
-        cnpj_salvo = self.get_cnpj_registrado()
+        self.cnpj_ativo = self.get_cnpj_registrado()
 
-        if not cnpj_salvo:
+        if not self.cnpj_ativo:
             self.solicitar_registro_cnpj()
         else:
-            sucesso, _ = self.validar_licenca_online(cnpj_salvo, silencioso=True)
+            sucesso, _ = self.validar_licenca_online(self.cnpj_ativo, silencioso=True)
             if sucesso: self.iniciar_sistema_principal()
             else: self.solicitar_registro_cnpj()
 
@@ -169,8 +166,7 @@ class BuscadorPNCP(ctk.CTk):
             messagebox.showerror("Erro na Atualização", f"Falha ao transferir a atualização: {e}\n\nFaça o download manualmente.")
             sys.exit()
 
-    def obter_hwid(self) -> str:
-        return str(uuid.getnode())
+    def obter_hwid(self) -> str: return str(uuid.getnode())
 
     def validar_licenca_online(self, cnpj_licenca: str, silencioso=False):
         if not self.url_api_licenca or "SUA-URL-AQUI" in self.url_api_licenca:
@@ -249,6 +245,7 @@ class BuscadorPNCP(ctk.CTk):
                     cursor.execute("DELETE FROM usuario_licenca")
                     cursor.execute("INSERT INTO usuario_licenca (token) VALUES (?)", (token_seguro,))
                     conn.commit()
+                self.cnpj_ativo = cnpj
                 messagebox.showinfo("Sucesso", "Licença ativada com sucesso!")
                 self.janela_login.destroy()
                 self.iniciar_sistema_principal()
@@ -262,7 +259,17 @@ class BuscadorPNCP(ctk.CTk):
         try: self.state('zoomed')
         except: self.attributes('-zoomed', True)
 
-        self.config_precos = {"vlr_unit_est": tk.BooleanVar(value=True), "vlr_total_est": tk.BooleanVar(value=True), "vlr_unit_hom": tk.BooleanVar(value=True), "vlr_total_hom": tk.BooleanVar(value=True)}
+        self.config_precos = {
+            "vlr_unit_est": tk.BooleanVar(value=True), 
+            "vlr_total_est": tk.BooleanVar(value=True), 
+            "vlr_unit_hom": tk.BooleanVar(value=True), 
+            "vlr_total_hom": tk.BooleanVar(value=True),
+            "media_orgao": tk.BooleanVar(value=True),
+            "media_geral": tk.BooleanVar(value=True),
+            "ultimo_orgao": tk.BooleanVar(value=True),
+            "ultimo_regiao": tk.BooleanVar(value=True)
+        }
+        
         self.lista_portais_comuns = ["Compras.gov.br", "Portal de Compras Públicas", "BLL", "Licitações-e", "BEC", "Licitar Digital", "AZ Informática", "BBMNET", "BNC", "Portal de Compras da Caixa", "Licitanet", "Abase Sistemas", "Compras RS", "Compras SC", "Compras GO", "Ammfoco", "TCE", "Prefeitura"]
         self.vars_portais = {portal: tk.BooleanVar(value=False) for portal in self.lista_portais_comuns}
         self.vars_portais["Todos"] = tk.BooleanVar(value=True) 
@@ -346,20 +353,17 @@ class BuscadorPNCP(ctk.CTk):
         self.registrar_log(f"[HTTP GET] Iniciando request -> {url}", apenas_terminal=True)
         self.registrar_log(f"           [PARAMS] {params}", apenas_terminal=True)
         
-        # Pausa de cortesia anti-429 entre requisições
-        time.sleep(10)
+        time.sleep(0.15)
         
         for tentativa in range(1, max_tentativas + 1):
             if (self.cancelar_busca if tipo_operacao == "busca" else self.cancelar_carga): return None
             try: 
                 res = self.http_session.get(url, params=params, timeout=(3.0, timeout))
                 
-                # --- TRATAMENTO ANTI-429 (RATE LIMIT) COM PAUSA EXPONENCIAL ---
                 if res.status_code == 429:
-                    tempo_espera = tentativa * 3 # Pausa progressiva: 3s, 6s, 9s...
+                    tempo_espera = tentativa * 3 
                     self.registrar_log(f"[HTTP 429] 🛑 RATE LIMIT DO PNCP ALCANÇADO! Pausando por {tempo_espera}s... (Tentativa {tentativa}/{max_tentativas})", apenas_terminal=True)
-                    self.registrar_log(f"🛑 O portal do Governo solicitou uma breve pausa. Aguardando {tempo_espera}s...", apenas_terminal=False)
-                    
+                    self.registrar_log(f"🛑 O Governo limitou o acesso por excesso de requisições. O robô vai aguardar {tempo_espera}s...", apenas_terminal=False)
                     for _ in range(int(tempo_espera * 10)):
                         if (self.cancelar_busca if tipo_operacao == "busca" else self.cancelar_carga): return None
                         time.sleep(0.1)
@@ -377,7 +381,6 @@ class BuscadorPNCP(ctk.CTk):
                 
                 self.registrar_log(f"⏳ Instabilidade na rede. Tentativa {tentativa}/{max_tentativas} aguardando...", apenas_terminal=False) 
                 self.registrar_log(f"[HTTP RETRY] Tentativa {tentativa}/{max_tentativas} falhou: {e}. Aguardando...", apenas_terminal=True)
-                
                 for _ in range(20):
                     if (self.cancelar_busca if tipo_operacao == "busca" else self.cancelar_carga): return None
                     time.sleep(0.1)
@@ -442,6 +445,111 @@ class BuscadorPNCP(ctk.CTk):
         except: pass
         return data_str
 
+    def _obter_historico_precos(self, desc_item, orgao, uf_atual):
+        cache_key = (desc_item, orgao, uf_atual)
+        if hasattr(self, 'cache_historico') and cache_key in self.cache_historico:
+            return self.cache_historico[cache_key]
+        
+        try:
+            um_ano_atras = (datetime.datetime.now() - datetime.timedelta(days=365)).strftime("%Y-%m-%d")
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT orgao, uf, vlr_unit_hom FROM editais_itens WHERE desc_item = ? AND data_publicacao >= ? ORDER BY data_publicacao DESC", (desc_item, um_ano_atras))
+                linhas = cursor.fetchall()
+            
+            soma_orgao, qtd_orgao = 0.0, 0
+            soma_geral, qtd_geral = 0.0, 0
+            ultimo_orgao = "Sem Histórico"
+            ultimo_regiao = "Sem Histórico"
+            
+            for row in linhas:
+                orgao_db, uf_db, vlr_str = row[0], row[1], row[2]
+                if not vlr_str or vlr_str == "Não informado": continue
+                
+                try: val_float = float(vlr_str.replace("R$ ", "").replace(".", "").replace(",", "."))
+                except: continue
+                
+                if val_float <= 0: continue
+                
+                if orgao_db == orgao:
+                    soma_orgao += val_float
+                    qtd_orgao += 1
+                    if ultimo_orgao == "Sem Histórico": ultimo_orgao = self.formatar_moeda(val_float)
+                else:
+                    soma_geral += val_float
+                    qtd_geral += 1
+                    
+                if uf_db == uf_atual and ultimo_regiao == "Sem Histórico":
+                    ultimo_regiao = self.formatar_moeda(val_float)
+                    
+            media_org = self.formatar_moeda(soma_orgao / qtd_orgao) if qtd_orgao > 0 else "Sem Histórico"
+            media_ger = self.formatar_moeda(soma_geral / qtd_geral) if qtd_geral > 0 else "Sem Histórico"
+            
+            if not hasattr(self, 'cache_historico'): self.cache_historico = {}
+            retorno = (media_org, media_ger, ultimo_orgao, ultimo_regiao)
+            self.cache_historico[cache_key] = retorno
+            return retorno
+        except Exception as e:
+            self.registrar_log(f"[DB] Erro ao calcular histórico: {e}", apenas_terminal=True)
+            return "Sem Histórico", "Sem Histórico", "Sem Histórico", "Sem Histórico"
+
+    def _sugerir_termos_cnae(self):
+        if not hasattr(self, 'cnpj_ativo') or not self.cnpj_ativo:
+            messagebox.showwarning("Aviso", "Nenhum CNPJ registado encontrado na sessão.")
+            return
+
+        cnpj_limpo = "".join(filter(str.isdigit, self.cnpj_ativo))
+        self.btn_cnae.configure(text="A procurar...", state="disabled")
+        self.update()
+
+        def _thread_cnae():
+            try:
+                self.registrar_log(f"[BRASIL API] Procurando dados do CNPJ {cnpj_limpo}...", apenas_terminal=True)
+                url = f"https://brasilapi.com.br/api/cnpj/v1/{cnpj_limpo}"
+                res = requests.get(url, timeout=10)
+                
+                if res.status_code == 404:
+                    self.after(0, lambda: messagebox.showerror("Erro", "CNPJ não encontrado na base da Receita Federal."))
+                    return
+                elif res.status_code != 200:
+                    self.after(0, lambda: messagebox.showerror("Erro", "O serviço da BrasilAPI está temporariamente indisponível."))
+                    return
+
+                dados = res.json()
+                descricoes = [dados.get("cnae_fiscal_descricao", "")]
+                
+                for cnae_sec in dados.get("cnaes_secundarios", []):
+                    descricoes.append(cnae_sec.get("descricao", ""))
+
+                palavras_ignoradas = {"comercio", "varejista", "atacadista", "de", "e", "artigos", "servicos", "manutencao", "reparacao", "fabricacao", "para", "em", "geral", "outros", "outras", "nao", "especificados", "anteriormente", "uso", "pecas", "acessorios", "instalacao"}
+                
+                palavras_chave = []
+                for desc in descricoes:
+                    if not desc: continue
+                    palavras = normalizar_texto(desc).split()
+                    for p in palavras:
+                        p_limpa = re.sub(r'[^a-z]', '', p)
+                        if len(p_limpa) > 2 and p_limpa not in palavras_ignoradas and p_limpa not in palavras_chave:
+                            palavras_chave.append(p_limpa)
+
+                termos_sugeridos = ", ".join(palavras_chave[:8])
+                
+                if termos_sugeridos:
+                    self.after(0, lambda: self.ent_termo.delete(0, 'end'))
+                    self.after(0, lambda: self.ent_termo.insert(0, termos_sugeridos))
+                    self.registrar_log(f"[CNAE IA] Termos extraídos: {termos_sugeridos}", apenas_terminal=True)
+                else:
+                    self.after(0, lambda: messagebox.showinfo("CNAE", "Não foi possível extrair palavras-chave comerciais úteis deste CNPJ."))
+
+            except Exception as e:
+                self.registrar_log(f"[CNAE ERROR] {e}", apenas_terminal=True)
+                self.after(0, lambda: messagebox.showerror("Erro de Conexão", "Não foi possível conectar à BrasilAPI para ler o CNAE."))
+            finally:
+                self.after(0, lambda: self.btn_cnae.configure(text="🎯 Sugerir Termos (CNAE)", state="normal"))
+
+        threading.Thread(target=_thread_cnae, daemon=True).start()
+
+    # --- FUNÇÕES DE MENU E INTERFACE RESTAURADAS ---
     def criar_menu_superior(self):
         self.menubar = tk.Menu(self)
         self.menu_opcoes = tk.Menu(self.menubar, tearoff=0)
@@ -571,9 +679,15 @@ class BuscadorPNCP(ctk.CTk):
         self.lbl_termo = ctk.CTkLabel(self.frame_busca, text="Produto/Serviço (Termo de busca):", font=("Arial", 12, "bold"))
         self.lbl_termo.grid(row=0, column=0, sticky="w", padx=5, pady=5)
 
-        self.ent_termo = ctk.CTkEntry(self.frame_busca, width=300, placeholder_text="Deixe vazio para extrair todo o Edital")
-        self.ent_termo.grid(row=0, column=1, columnspan=2, sticky="we", padx=5, pady=5)
+        self.frame_termo = ctk.CTkFrame(self.frame_busca, fg_color="transparent")
+        self.frame_termo.grid(row=0, column=1, columnspan=2, sticky="we", padx=5, pady=5)
+        
+        self.ent_termo = ctk.CTkEntry(self.frame_termo, width=280, placeholder_text="Deixe vazio para extrair todo o Edital")
+        self.ent_termo.pack(side="left", fill="x", expand=True, padx=(0, 5))
         self.ent_termo.bind("<Return>", lambda e: self.iniciar_busca())
+        
+        self.btn_cnae = ctk.CTkButton(self.frame_termo, text="🎯 Sugerir Termos (CNAE)", fg_color="#27ae60", hover_color="#2ecc71", width=140, command=self._sugerir_termos_cnae)
+        self.btn_cnae.pack(side="left")
 
         self.lbl_alvo = ctk.CTkLabel(self.frame_busca, text="Onde buscar o termo:")
         self.lbl_alvo.grid(row=0, column=3, sticky="e", padx=5, pady=5)
@@ -658,7 +772,7 @@ class BuscadorPNCP(ctk.CTk):
         self.frame_tabela = ctk.CTkFrame(self.tab_pesquisa)
         self.frame_tabela.pack(fill="both", expand=True, padx=10, pady=2)
 
-        colunas = ("orgao", "uf", "portal", "edital", "objeto", "qtd", "vlr_unit_est", "vlr_total_est", "vlr_unit_hom", "vlr_total_hom", "data", "data_abertura", "data_encerramento", "cnpj", "ano", "seq", "modalidade_nome", "objeto_contrato")
+        colunas = ("orgao", "uf", "portal", "edital", "objeto", "qtd", "vlr_unit_est", "vlr_total_est", "vlr_unit_hom", "vlr_total_hom", "media_orgao", "media_geral", "ultimo_orgao", "ultimo_regiao", "data", "data_abertura", "data_encerramento", "cnpj", "ano", "seq", "modalidade_nome", "objeto_contrato")
         self.tree = ttk.Treeview(self.frame_tabela, columns=colunas, show="headings")
         
         self.tree.heading("orgao", text="Órgão / Unidade")
@@ -671,6 +785,10 @@ class BuscadorPNCP(ctk.CTk):
         self.tree.heading("vlr_total_est", text="Total Estimado")
         self.tree.heading("vlr_unit_hom", text="Unit. Homologado")
         self.tree.heading("vlr_total_hom", text="Total Homologado")
+        self.tree.heading("media_orgao", text="Média Órgão (12m)")
+        self.tree.heading("media_geral", text="Média Geral (12m)")
+        self.tree.heading("ultimo_orgao", text="Últ. Preço (Órgão)")
+        self.tree.heading("ultimo_regiao", text="Últ. Preço (Região)")
         self.tree.heading("data", text="Data Pub.")
         self.tree.heading("data_abertura", text="Abertura")
         self.tree.heading("data_encerramento", text="Encerramento")
@@ -688,6 +806,10 @@ class BuscadorPNCP(ctk.CTk):
         self.tree.column("vlr_total_est", width=100, anchor="e", minwidth=80, stretch=tk.YES)
         self.tree.column("vlr_unit_hom", width=100, anchor="e", minwidth=80, stretch=tk.YES)
         self.tree.column("vlr_total_hom", width=100, anchor="e", minwidth=80, stretch=tk.YES)
+        self.tree.column("media_orgao", width=110, anchor="e", minwidth=90, stretch=tk.YES)
+        self.tree.column("media_geral", width=110, anchor="e", minwidth=90, stretch=tk.YES)
+        self.tree.column("ultimo_orgao", width=110, anchor="e", minwidth=90, stretch=tk.YES)
+        self.tree.column("ultimo_regiao", width=110, anchor="e", minwidth=90, stretch=tk.YES)
         self.tree.column("data", width=90, anchor="center", minwidth=80, stretch=tk.YES)
         self.tree.column("data_abertura", width=130, anchor="center", minwidth=90, stretch=tk.YES)
         self.tree.column("data_encerramento", width=130, anchor="center", minwidth=90, stretch=tk.YES)
@@ -704,7 +826,7 @@ class BuscadorPNCP(ctk.CTk):
         self.frame_detalhes = ctk.CTkFrame(self.tab_pesquisa, fg_color="transparent")
         self.frame_detalhes.pack(fill="x", padx=10, pady=(2, 10))
 
-        self.txt_detalhes = ctk.CTkTextbox(self.frame_detalhes, height=90, font=("Arial", 12), text_color="#2c3e50")
+        self.txt_detalhes = ctk.CTkTextbox(self.frame_detalhes, height=100, font=("Arial", 12), text_color="#2c3e50")
         self.txt_detalhes.pack(side="left", fill="both", expand=True, padx=(0, 5))
         self.txt_detalhes.insert("end", "Selecione um item na tabela acima para visualizar a descrição multilinha aqui.")
         self.txt_detalhes.configure(state="disabled")
@@ -724,7 +846,7 @@ class BuscadorPNCP(ctk.CTk):
     def _ordenar_coluna(self, col, reverse):
         lista = [(self.tree.set(k, col), k) for k in self.tree.get_children('')]
         def converter_valor(val):
-            if not val or val in ("Não informado", "N/I"): return -1
+            if not val or val in ("Não informado", "N/I", "Sem Histórico"): return -1
             if "R$" in val:
                 try: return float(val.replace("R$ ", "").replace(".", "").replace(",", "."))
                 except: pass
@@ -742,17 +864,21 @@ class BuscadorPNCP(ctk.CTk):
 
     def aplicar_colunas_grid(self):
         colunas_visiveis = ["orgao", "uf", "portal", "edital", "objeto", "qtd"]
-        if self.config_precos["vlr_unit_est"].get(): colunas_visiveis.append("vlr_unit_est")
-        if self.config_precos["vlr_total_est"].get(): colunas_visiveis.append("vlr_total_est")
-        if self.config_precos["vlr_unit_hom"].get(): colunas_visiveis.append("vlr_unit_hom")
-        if self.config_precos["vlr_total_hom"].get(): colunas_visiveis.append("vlr_total_hom")
+        if self.config_precos.get("vlr_unit_est", tk.BooleanVar(value=True)).get(): colunas_visiveis.append("vlr_unit_est")
+        if self.config_precos.get("vlr_total_est", tk.BooleanVar(value=True)).get(): colunas_visiveis.append("vlr_total_est")
+        if self.config_precos.get("vlr_unit_hom", tk.BooleanVar(value=True)).get(): colunas_visiveis.append("vlr_unit_hom")
+        if self.config_precos.get("vlr_total_hom", tk.BooleanVar(value=True)).get(): colunas_visiveis.append("vlr_total_hom")
+        if self.config_precos.get("media_orgao", tk.BooleanVar(value=True)).get(): colunas_visiveis.append("media_orgao")
+        if self.config_precos.get("media_geral", tk.BooleanVar(value=True)).get(): colunas_visiveis.append("media_geral")
+        if self.config_precos.get("ultimo_orgao", tk.BooleanVar(value=True)).get(): colunas_visiveis.append("ultimo_orgao")
+        if self.config_precos.get("ultimo_regiao", tk.BooleanVar(value=True)).get(): colunas_visiveis.append("ultimo_regiao")
         colunas_visiveis.extend(["data", "data_abertura", "data_encerramento"])
         self.tree.configure(displaycolumns=colunas_visiveis)
 
     def abrir_menu_configuracao(self):
         janela_config = ctk.CTkToplevel(self)
         janela_config.title("Configurar Colunas de Preço")
-        janela_config.geometry("350x250")
+        janela_config.geometry("380x350")
         janela_config.transient(self) 
         janela_config.grab_set() 
         lbl_titulo = ctk.CTkLabel(janela_config, text="Selecione as colunas a apresentar:", font=("Arial", 12, "bold"))
@@ -761,6 +887,10 @@ class BuscadorPNCP(ctk.CTk):
         ctk.CTkCheckBox(janela_config, text="Valor Total Estimado", variable=self.config_precos["vlr_total_est"]).pack(anchor="w", padx=40, pady=5)
         ctk.CTkCheckBox(janela_config, text="Valor Unitário Homologado", variable=self.config_precos["vlr_unit_hom"]).pack(anchor="w", padx=40, pady=5)
         ctk.CTkCheckBox(janela_config, text="Valor Total Homologado", variable=self.config_precos["vlr_total_hom"]).pack(anchor="w", padx=40, pady=5)
+        ctk.CTkCheckBox(janela_config, text="Média do Órgão (Últ. 12 meses)", variable=self.config_precos["media_orgao"]).pack(anchor="w", padx=40, pady=5)
+        ctk.CTkCheckBox(janela_config, text="Média Geral (Últ. 12 meses)", variable=self.config_precos["media_geral"]).pack(anchor="w", padx=40, pady=5)
+        ctk.CTkCheckBox(janela_config, text="Último Preço Vencedor (Próprio Órgão)", variable=self.config_precos["ultimo_orgao"]).pack(anchor="w", padx=40, pady=5)
+        ctk.CTkCheckBox(janela_config, text="Último Preço Vencedor (Região/UF)", variable=self.config_precos["ultimo_regiao"]).pack(anchor="w", padx=40, pady=5)
         ctk.CTkButton(janela_config, text="Aplicar e Fechar", command=lambda: [self.aplicar_colunas_grid(), janela_config.destroy()]).pack(pady=20)
 
     def _on_chk_todos_portais_click(self):
@@ -819,13 +949,17 @@ class BuscadorPNCP(ctk.CTk):
         item_id = self.tree.focus()
         if not item_id: return
         valores = self.tree.item(item_id, "values")
-        if len(valores) >= 18:
+        if len(valores) >= 22:
             orgao, uf, portal, edital_resumo, desc_item_completo = valores[0], valores[1], valores[2], valores[3], valores[4]
-            data_abertura, data_encerramento = valores[11], valores[12]
-            cnpj, ano, seq, mod_nome, objeto_geral = valores[13], valores[14], valores[15], valores[16], valores[17]
+            media_org, media_ger = valores[10], valores[11]
+            ult_org, ult_reg = valores[12], valores[13]
+            data_abertura, data_encerramento = valores[14], valores[15]
+            cnpj, ano, seq, mod_nome, objeto_geral = valores[17], valores[18], valores[19], valores[20], valores[21]
+            
             self.item_selecionado_doc = (cnpj, ano, seq)
             self.btn_arquivos.configure(state="normal")
-            texto_exibicao = f"🏢 ÓRGÃO: {orgao} ({uf})   |   🌐 PORTAL: {portal}\n📄 EDITAL: {edital_resumo}  |  ⚖️ MODALIDADE: {mod_nome}  |  🔗 Link: https://pncp.gov.br/app/editais/{cnpj}/{ano}/{seq}\n⏰ DISPUTA: Abertura em {data_abertura} - Encerramento em {data_encerramento}\n🎯 OBJETO GERAL: {objeto_geral}\n📦 DESCRIÇÃO DO ITEM: {desc_item_completo}"
+            
+            texto_exibicao = f"🏢 ÓRGÃO: {orgao} ({uf})   |   🌐 PORTAL: {portal}\n📄 EDITAL: {edital_resumo}  |  ⚖️ MODALIDADE: {mod_nome}  |  🔗 Link: https://pncp.gov.br/app/editais/{cnpj}/{ano}/{seq}\n⏰ DISPUTA: Abertura em {data_abertura} - Encerramento em {data_encerramento}\n📊 PREÇO MÉDIO: No Órgão ({media_org})  |  Geral ({media_ger})\n🏆 ÚLTIMO VENCEDOR: No Órgão ({ult_org})  |  Na Região/UF ({ult_reg})\n🎯 OBJETO GERAL: {objeto_geral}\n📦 DESCRIÇÃO DO ITEM: {desc_item_completo}"
             self.txt_detalhes.configure(state="normal")
             self.txt_detalhes.delete("1.0", "end")
             self.txt_detalhes.insert("end", texto_exibicao)
@@ -835,7 +969,7 @@ class BuscadorPNCP(ctk.CTk):
         item_id = self.tree.focus()
         if not item_id: return
         valores = self.tree.item(item_id, "values")
-        if len(valores) >= 16: webbrowser.open(f"https://pncp.gov.br/app/editais/{valores[13]}/{valores[14]}/{valores[15]}")
+        if len(valores) >= 20: webbrowser.open(f"https://pncp.gov.br/app/editais/{valores[17]}/{valores[18]}/{valores[19]}")
 
     def abrir_janela_arquivos(self):
         if not self.item_selecionado_doc: return
@@ -917,6 +1051,7 @@ class BuscadorPNCP(ctk.CTk):
             
         self.cancelar_busca = False
         self.mostrar_carga_no_grid = False 
+        self.cache_historico = {} 
         self.btn_buscar.configure(text="⏹ Parar Busca", fg_color="#e74c3c", hover_color="#c0392b", command=self.cancelar_busca_manual)
 
         if self.is_carga_running:
@@ -987,7 +1122,9 @@ class BuscadorPNCP(ctk.CTk):
                 edital_exibicao = str(row[15]).split('|')[0] if '|' in str(row[15]) else str(row[15])
                 if not edital_exibicao: edital_exibicao = str(row[14])
                 
-                self.after(0, lambda r=row, ed_ex=edital_exibicao: self._adicionar_item_tabela(r[0], r[1], r[18], f"{ed_ex}/{r[13]}", r[3], r[4], r[5], r[6], r[7], r[8], r[9], r[10], r[11], r[12], r[13], r[14], r[17], r[2]))
+                media_org, media_ger, ult_org, ult_reg = self._obter_historico_precos(row[3], row[0], row[1])
+                
+                self.after(0, lambda r=row, ed_ex=edital_exibicao, mo=media_org, mg=media_ger, uo=ult_org, ur=ult_reg: self._adicionar_item_tabela(r[0], r[1], r[18], f"{ed_ex}/{r[13]}", r[3], r[4], r[5], r[6], r[7], r[8], mo, mg, uo, ur, r[9], r[10], r[11], r[12], r[13], r[14], r[17], r[2]))
                 count += 1
                 
             if not self.cancelar_busca: self.after(0, lambda: self._finalizar_busca_ui(count, f"{count} itens encontrados na Base Local."))
@@ -1111,13 +1248,15 @@ class BuscadorPNCP(ctk.CTk):
                                 
                                 reg = {"Orgao": orgao, "UF": uf, "ObjetoContrato": objeto_contrato, "DescItem": desc_item, "Qtd": qtd, "Vlr Unit Est": self.formatar_moeda(v_u_est), "Vlr Total Est": self.formatar_moeda(v_t_est), "Vlr Unit Hom": self.formatar_moeda(v_u_hom), "Vlr Total Hom": self.formatar_moeda(v_t_hom), "Data Pub": data_pub, "Data Abertura": data_abertura, "Data Encerramento": data_encerramento, "CNPJ": cnpj, "Ano": ano, "Sequencial": seq, "NumeroCompra": f"{numero_compra}|{numero_processo}", "UASG": codigo_unidade, "NumeroItem": num_item, "ModalidadeID": str(cod_modalidade), "ModalidadeNome": mod_nome, "PortalNome": portal_nome}
                                 
+                                media_org, media_ger, ult_org, ult_reg = self._obter_historico_precos(desc_item, orgao, uf)
+
                                 if tipo_operacao == "busca" or (tipo_operacao == "carga" and self.mostrar_carga_no_grid):
                                     self.resultados_pncp.append(reg)
                                     
                                     edital_exibicao = numero_compra if numero_compra else str(seq)
                                     if numero_processo and numero_processo != numero_compra: edital_exibicao += f" (Proc: {numero_processo})"
                                     
-                                    self.after(0, lambda r=reg, ed_ex=edital_exibicao: self._adicionar_item_tabela(r["Orgao"], r["UF"], r["PortalNome"], f"{ed_ex}/{r['Ano']}", r["DescItem"], r["Qtd"], r["Vlr Unit Est"], r["Vlr Total Est"], r["Vlr Unit Hom"], r["Vlr Total Hom"], r["Data Pub"], r["Data Abertura"], r["Data Encerramento"], r["CNPJ"], r["Ano"], r["Sequencial"], r["ModalidadeNome"], r["ObjetoContrato"]))
+                                    self.after(0, lambda r=reg, ed_ex=edital_exibicao, mo=media_org, mg=media_ger, uo=ult_org, ur=ult_reg: self._adicionar_item_tabela(r["Orgao"], r["UF"], r["PortalNome"], f"{ed_ex}/{r['Ano']}", r["DescItem"], r["Qtd"], r["Vlr Unit Est"], r["Vlr Total Est"], r["Vlr Unit Hom"], r["Vlr Total Hom"], mo, mg, uo, ur, r["Data Pub"], r["Data Abertura"], r["Data Encerramento"], r["CNPJ"], r["Ano"], r["Sequencial"], r["ModalidadeNome"], r["ObjetoContrato"]))
                                     self.after(0, lambda: self.tree.yview_moveto(1))
                                     
                                 self.salvar_item_db(reg)
@@ -1135,9 +1274,6 @@ class BuscadorPNCP(ctk.CTk):
 
     def _limpar_tabela(self):
         for row in self.tree.get_children(): self.tree.delete(row)
-
-    def _adicionar_item_tabela(self, orgao, uf, portal, edital, desc, qtd, unit_est, total_est, unit_hom, total_hom, data_pub, data_abertura, data_encerramento, cnpj, ano, seq, mod_nome, obj_contrato):
-        self.tree.insert("", "end", values=(orgao, uf, portal, edital, desc, qtd, unit_est, total_est, unit_hom, total_hom, data_pub, data_abertura, data_encerramento, cnpj, ano, seq, mod_nome, obj_contrato))
 
     def _finalizar_busca_ui(self, qtd, msg_status):
         self.btn_buscar.configure(text="🔍 Pesquisar", fg_color=self.default_btn_buscar_fg, hover_color=self.default_btn_buscar_hover, command=self.iniciar_busca, state="normal")
