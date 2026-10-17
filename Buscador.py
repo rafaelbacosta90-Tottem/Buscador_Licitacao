@@ -956,7 +956,13 @@ class BuscadorPNCP(ctk.CTk):
                 if url_doc: 
                     ctk.CTkButton(frame_item, text="📥 Abrir / Download", width=140, fg_color="#2980b9", hover_color="#1a5276", font=("Segoe UI", 11, "bold"), command=lambda u=url_doc: webbrowser.open(u)).pack(side="right", padx=10, pady=10)
     
-    
+    def _enviar_telemetria_background(self, qtd_editais):
+        if not getattr(self, "cnpj_ativo", None) or qtd_editais <= 0: return
+        try:
+            url_telemetria = self.url_api_licenca.replace("/valida", "/telemetria")
+            payload = {"cnpj": self.cnpj_ativo, "maquina": platform.node(), "qtd_editais": qtd_editais}
+            requests.post(url_telemetria, json=payload, timeout=5)
+        except: pass
 
     # ---------------------------------------------------------
     # UI COMPLETA (Interface Gráfica e Menus)
@@ -1786,6 +1792,9 @@ class BuscadorPNCP(ctk.CTk):
                     except Exception:
                         self.registrar_log(f"⚠️ Aviso: Falha ao baixar itens do edital {seq}/{ano}. Saltando...")
                         break
+        if itens_salvos_count > 0:
+            threading.Thread(target=self._enviar_telemetria_background, args=(itens_salvos_count,), daemon=True).start()
+            
         return itens_salvos_count
 
     def _adicionar_item_tabela(self, orgao, uf, portal, edital, desc, qtd, unit_est, total_est, unit_hom, total_hom, media_orgao, media_geral, ult_org, ult_reg, data_pub, data_abertura, data_encerramento, cnpj, ano, seq, mod_nome, obj_contrato):
@@ -1864,6 +1873,7 @@ class BuscadorPNCP(ctk.CTk):
                         self.registrar_log(f"🔔 [RADAR] Encontradas {len(novas_oportunidades)} novas oportunidades! Enviando e-mail...", apenas_terminal=False)
                         self.after(0, self.atualizar_sininho)
                         self._enviar_email_radar(config, novas_oportunidades)
+                        threading.Thread(target=self._enviar_telemetria_background, args=(len(novas_oportunidades),), daemon=True).start()
 
                 except Exception as e:
                     self.registrar_log(f"⚠️ [RADAR ERROR] Falha na varredura: {e}", apenas_terminal=True)
