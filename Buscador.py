@@ -167,6 +167,11 @@ class DatabaseManager:
                     orgao TEXT, objeto TEXT, link TEXT, data_registro TIMESTAMP DEFAULT CURRENT_TIMESTAMP, 
                     lida BOOLEAN DEFAULT FALSE
                 )""")
+                # Tabela para configurações e temporizadores locais do App
+                cursor.execute("""CREATE TABLE IF NOT EXISTS app_config (
+                    chave TEXT PRIMARY KEY, 
+                    valor TEXT
+                )""")
                 conn.commit()
         except Exception as e:
             self.log(f"[SQLITE ERROR] Falha ao iniciar DB: {e}", apenas_terminal=True)
@@ -186,6 +191,7 @@ class DatabaseManager:
         except: return ""
 
     def salvar_api_key(self, provedor, chave):
+        # Criptografa a chave de IA antes de salvar no banco
         cifrada = self.criptografar_texto(chave)
         with sqlite3.connect(self.db_path) as conn:
             conn.execute("INSERT OR REPLACE INTO api_keys (provedor, chave) VALUES (?, ?)", (provedor, cifrada))
@@ -195,7 +201,8 @@ class DatabaseManager:
         try:
             with sqlite3.connect(self.db_path) as conn:
                 row = conn.cursor().execute("SELECT chave FROM api_keys WHERE provedor = ?", (provedor,)).fetchone()
-                return self.descriptografar_texto(row[0]) if row else ""
+                # Descriptografa a chave de IA ao enviar para o OpenRouter/Gemini
+                return self.descriptografar_texto(row[0]) if row and row[0] else ""
         except: return ""
     # ----------------------------------------
 
@@ -313,6 +320,26 @@ class DatabaseManager:
             self.log(f"[DB] Erro ao calcular histórico: {e}", apenas_terminal=True)
             return "Sem Histórico", "Sem Histórico", "Sem Histórico", "Sem Histórico"
 
+    
+    # =======================================================
+    # FUNÇÕES DE CONFIGURAÇÃO (100% CRIPTOGRAFADAS)
+    # =======================================================
+    def obter_config(self, chave):
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                row = conn.cursor().execute("SELECT valor FROM app_config WHERE chave=?", (chave,)).fetchone()
+                # Descriptografa o valor da data/configuração ao ler do banco
+                return self.descriptografar_texto(row[0]) if row and row[0] else None
+        except: return None
+
+    def salvar_config(self, chave, valor):
+        # Criptografa o valor antes de salvar no banco
+        valor_cifrado = self.criptografar_texto(str(valor))
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("INSERT OR REPLACE INTO app_config (chave, valor) VALUES (?, ?)", (chave, valor_cifrado))
+            conn.commit()
+    
+    
     def obter_config_alertas(self):
         try:
             with sqlite3.connect(self.db_path) as conn:
@@ -345,6 +372,7 @@ class DatabaseManager:
         with sqlite3.connect(self.db_path) as conn:
             conn.execute("UPDATE alertas_notificacoes SET lida=1 WHERE lida=0")
             conn.commit()
+            
     
     
     def limpar_cache(self):
@@ -437,8 +465,12 @@ class BuscadorPNCP(ctk.CTk):
         if not self.cnpj_ativo:
             self.solicitar_registro_cnpj()
         else:
-            sucesso, _ = self.validar_licenca_online(self.cnpj_ativo, silencioso=True)
-            if sucesso: self.iniciar_sistema_principal()
+            sucesso, data_validade = self.validar_licenca_online(self.cnpj_ativo, silencioso=True) 
+            if sucesso: 
+                self.iniciar_sistema_principal()
+                # Chama a barra de aviso caso falte 7 dias (Dá 1 segundo de delay visual)
+                self.after(1000, lambda: self.verificar_alerta_vencimento(data_validade))
+            
             else: self.solicitar_registro_cnpj()
 
     def verificar_versao_inicial(self):
@@ -496,7 +528,12 @@ class BuscadorPNCP(ctk.CTk):
             if not silencioso: messagebox.showerror("Erro de Configuração", "A URL da API da Vercel não foi configurada.")
             return False, None
 
-        payload = {"cnpj": cnpj_licenca, "hwid": str(uuid.getnode()), "maquina": platform.node(), "data_acesso": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "versao_atual": self.versao_local}
+        payload = {"cnpj": cnpj_licenca, 
+                   "hwid": str(uuid.getnode()), 
+                   "maquina": platform.node(), 
+                   "data_acesso": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 
+                   "versao_atual": self.versao_local,
+                   "ferramenta": "Buscador PNCP"}
         self.registrar_log(f"[AUTH] Validando licença para CNPJ: {cnpj_licenca}", apenas_terminal=True)
         try:
             response = requests.post(self.url_api_licenca, json=payload, timeout=10)
@@ -541,6 +578,8 @@ class BuscadorPNCP(ctk.CTk):
                 messagebox.showinfo("Sucesso", "Licença ativada com sucesso!")
                 self.janela_login.destroy()
                 self.iniciar_sistema_principal()
+                # Chama o aviso logo após a primeira ativação
+                self.after(1000, lambda: self.verificar_alerta_vencimento(data_validade))
             except Exception as e:
                 messagebox.showerror("Erro de Segurança", f"Falha ao gerar token: {e}")
                 self.btn_ativar.configure(text="Validar Online", state="normal")
@@ -771,7 +810,10 @@ class BuscadorPNCP(ctk.CTk):
                 
                 # 1. Bate na API para incrementar o contador e pegar as chaves
                 url_api_ia = self.url_api_licenca.replace("/valida", "/ia_uso") # Constrói a URL dinamicamente
-                payload_ia = {"cnpj": self.cnpj_ativo, "maquina": platform.node(), "incrementar": True}
+                payload_ia = {"cnpj": self.cnpj_ativo,
+                              "hwid": str(uuid.getnode()), 
+                              "maquina": platform.node(), 
+                              "incrementar": True}
                 
                 try:
                     res_api = requests.post(url_api_ia, json=payload_ia, timeout=10)
@@ -999,6 +1041,60 @@ class BuscadorPNCP(ctk.CTk):
         
         # INICIA O RADAR INVISÍVEL
         self.iniciar_motor_radar_background()
+        
+    def verificar_alerta_vencimento(self, data_validade_str):
+        if not data_validade_str: return
+        self.data_validade_atual = data_validade_str # Guarda em memória
+        
+        try:
+            dt_validade = datetime.datetime.strptime(data_validade_str[:10], "%Y-%m-%d").date()
+            dt_hoje = datetime.date.today()
+            dias_restantes = (dt_validade - dt_hoje).days
+            
+            if dias_restantes <= 7:
+                # Verifica se o cliente já fechou este aviso nas últimas 24h
+                oculto_ate_str = self.db.obter_config("alerta_oculto_ate")
+                if oculto_ate_str:
+                    oculto_ate = datetime.datetime.strptime(oculto_ate_str, "%Y-%m-%d %H:%M:%S")
+                    if datetime.datetime.now() < oculto_ate:
+                        # Se ainda está oculto, programa para voltar a aparecer quando as 24h acabarem
+                        segundos = (oculto_ate - datetime.datetime.now()).total_seconds()
+                        if segundos > 0:
+                            self.after(int(segundos * 1000), lambda: self.verificar_alerta_vencimento(self.data_validade_atual))
+                        return
+                
+                # Define o Design conforme os dias
+                if dias_restantes <= 1:
+                    cor_fundo = "#e74c3c" # Vermelho Forte (Urgente)
+                    cor_texto = "#ffffff"
+                    if dias_restantes < 0:
+                        texto = f"⚠️ A SUA LICENÇA EXPIROU HÁ {abs(dias_restantes)} DIA(S)! Por favor, renove agora."
+                    else:
+                        texto = f"⚠️ ATENÇÃO: A sua licença expira AMANHÃ ({dt_validade.strftime('%d/%m/%Y')})! Renove para evitar bloqueio."
+                else:
+                    cor_fundo = "#f1c40f" # Amarelo/Laranja (Atenção)
+                    cor_texto = "#2c3e50"
+                    texto = f"⏳ Aviso: A sua licença expira daqui a {dias_restantes} dias (em {dt_validade.strftime('%d/%m/%Y')})."
+                    
+                self.frame_alerta_licenca.configure(fg_color=cor_fundo)
+                self.lbl_alerta_licenca.configure(text=texto, text_color=cor_texto)
+                
+                # Exibe o rodapé no final da janela
+                self.frame_alerta_licenca.pack(side="bottom", fill="x", pady=0)
+                
+        except Exception as e:
+            self.registrar_log(f"[ALERTA ERROR] Erro na data da licença: {e}", apenas_terminal=True)
+
+    def fechar_alerta_vencimento(self):
+        # Esconde o rodapé imediatamente
+        self.frame_alerta_licenca.pack_forget()
+        
+        # Regista na Base de Dados que só pode voltar a mostrar daqui a 24 horas
+        daqui_a_24h = (datetime.datetime.now() + datetime.timedelta(hours=24)).strftime("%Y-%m-%d %H:%M:%S")
+        self.db.salvar_config("alerta_oculto_ate", daqui_a_24h)
+        
+        # Garante que, se o utilizador não desligar o PC, reabre daqui a 24h certas
+        self.after(24 * 60 * 60 * 1000, lambda: self.verificar_alerta_vencimento(getattr(self, 'data_validade_atual', None)))
 
     def criar_menu_superior(self):
         self.menubar = tk.Menu(self)
@@ -1335,6 +1431,19 @@ class BuscadorPNCP(ctk.CTk):
         
         self.txt_logs = ctk.CTkTextbox(self.tab_logs, font=("Consolas", 11))
         self.txt_logs.pack(fill="both", expand=True, padx=10, pady=10)
+        
+        # --- ALERTA DE VENCIMENTO DE LICENÇA (RODAPÉ INVISÍVEL) ---
+        self.frame_alerta_licenca = ctk.CTkFrame(self, corner_radius=0, height=35)
+        
+        self.lbl_alerta_licenca = ctk.CTkLabel(self.frame_alerta_licenca, text="", font=("Segoe UI", 13, "bold"))
+        self.lbl_alerta_licenca.pack(side="left", padx=20, pady=5, expand=True)
+        
+        self.btn_fechar_alerta = ctk.CTkButton(
+            self.frame_alerta_licenca, text="✖ Fechar", width=80, height=28, 
+            fg_color="#c0392b", hover_color="#e74c3c", font=("Segoe UI", 12, "bold"), 
+            command=self.fechar_alerta_vencimento
+        )
+        self.btn_fechar_alerta.pack(side="right", padx=20, pady=5)
 
     def _ordenar_coluna(self, col, reverse):
         lista = [(self.tree.set(k, col), k) for k in self.tree.get_children('')]
