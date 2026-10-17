@@ -20,6 +20,9 @@ import requests
 import hmac
 import hashlib
 import base64
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
 # Importação da biblioteca de leitura de PDFs (Fallback se não instalada)
 try:
@@ -154,11 +157,20 @@ class DatabaseManager:
                 
                 cursor.execute("CREATE TABLE IF NOT EXISTS usuario_licenca (id INTEGER PRIMARY KEY AUTOINCREMENT, token TEXT NOT NULL)")
                 cursor.execute("CREATE TABLE IF NOT EXISTS api_keys (provedor TEXT PRIMARY KEY, chave TEXT)")
+                # Novas tabelas para Alertas e Notificações
+                cursor.execute("""CREATE TABLE IF NOT EXISTS alertas_config (
+                    id INTEGER PRIMARY KEY DEFAULT 1, email_destino TEXT, email_remetente TEXT, 
+                    senha_app TEXT, palavras_chave TEXT, uf_filtro TEXT, modalidade_filtro TEXT
+                )""")
+                cursor.execute("""CREATE TABLE IF NOT EXISTS alertas_notificacoes (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, chave_edital TEXT UNIQUE, 
+                    orgao TEXT, objeto TEXT, link TEXT, data_registro TIMESTAMP DEFAULT CURRENT_TIMESTAMP, 
+                    lida BOOLEAN DEFAULT FALSE
+                )""")
                 conn.commit()
         except Exception as e:
             self.log(f"[SQLITE ERROR] Falha ao iniciar DB: {e}", apenas_terminal=True)
 
-    # --- CRIPTOGRAFIA DAS CHAVES DE API ---
     def criptografar_texto(self, texto):
         if not texto: return ""
         key = self.chave_seguranca
@@ -301,6 +313,40 @@ class DatabaseManager:
             self.log(f"[DB] Erro ao calcular histórico: {e}", apenas_terminal=True)
             return "Sem Histórico", "Sem Histórico", "Sem Histórico", "Sem Histórico"
 
+    def obter_config_alertas(self):
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                row = conn.cursor().execute("SELECT email_destino, email_remetente, senha_app, palavras_chave, uf_filtro, modalidade_filtro FROM alertas_config WHERE id=1").fetchone()
+                if row: return {"destino": row[0], "remetente": row[1], "senha": self.descriptografar_texto(row[2]), "palavras": row[3], "uf": row[4], "modalidade": row[5]}
+        except: pass
+        return {"destino": "", "remetente": "", "senha": "", "palavras": "", "uf": "Todas", "modalidade": ""}
+
+    def salvar_config_alertas(self, dest, remet, senha, pal, uf, mod):
+        senha_cifrada = self.criptografar_texto(senha) if senha else ""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("INSERT OR REPLACE INTO alertas_config (id, email_destino, email_remetente, senha_app, palavras_chave, uf_filtro, modalidade_filtro) VALUES (1, ?, ?, ?, ?, ?, ?)", (dest, remet, senha_cifrada, pal, uf, mod))
+            conn.commit()
+
+    def registrar_notificacao_nova(self, chave_edital, orgao, objeto, link):
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute("INSERT INTO alertas_notificacoes (chave_edital, orgao, objeto, link) VALUES (?, ?, ?, ?)", (chave_edital, orgao, objeto, link))
+                conn.commit()
+                return True # Nova mesmo
+        except sqlite3.IntegrityError:
+            return False # Já estava notificada
+
+    def obter_notificacoes(self, apenas_nao_lidas=True):
+        with sqlite3.connect(self.db_path) as conn:
+            sql = "SELECT id, orgao, objeto, link, lida FROM alertas_notificacoes" + (" WHERE lida=0" if apenas_nao_lidas else "") + " ORDER BY id DESC LIMIT 50"
+            return conn.cursor().execute(sql).fetchall()
+
+    def marcar_notificacoes_lidas(self):
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("UPDATE alertas_notificacoes SET lida=1 WHERE lida=0")
+            conn.commit()
+    
+    
     def limpar_cache(self):
         self.cache_historico = {}
 
@@ -713,22 +759,47 @@ class BuscadorPNCP(ctk.CTk):
                         pdf_texto_puro = "⚠️ O texto dos PDFs não pôde ser extraído."
 
             # =====================================================================
-            # ETAPA 3: IA GENERATIVA (Dots3 com Fallback no Gemini + Banco de Dados)
+            # ETAPA 3: IA GENERATIVA (Validada pela Nuvem / Vercel)
             # =====================================================================
             analise_salva = self.db.carregar_analise_ia(cnpj, ano, seq)
             
             if analise_salva:
-                self.registrar_log("✅ Análise instantânea: Carregada da Base de Dados Local (Sem custos API).")
+                self.registrar_log("✅ Análise instantânea: Carregada da Base de Dados Local (Sem consumir limite da Nuvem).")
                 relatorio = analise_salva
             else:
-                chave_dots = self.db.obter_api_key("DOTS")
-                chave_gemini = self.db.obter_api_key("GEMINI")
+                self.registrar_log("🔄 Verificando permissões e limites na Nuvem...")
                 
-                if not chave_dots and not chave_gemini:
-                    relatorio = "⚠️ NENHUMA CHAVE DE IA CONFIGURADA.\n\nVá ao menu 'Opções' > 'Configurar Chaves de API (IA)' e insira a chave do DOTS ou Gemini."
-                    self.after(0, lambda: self.mostrar_janela_analise(relatorio, pdf_texto_puro, arquivos_lista))
+                # 1. Bate na API para incrementar o contador e pegar as chaves
+                url_api_ia = self.url_api_licenca.replace("/valida", "/ia_uso") # Constrói a URL dinamicamente
+                payload_ia = {"cnpj": self.cnpj_ativo, "maquina": platform.node(), "incrementar": True}
+                
+                try:
+                    res_api = requests.post(url_api_ia, json=payload_ia, timeout=10)
+                    dados_api = res_api.json()
+                    
+                    if dados_api.get("status") == "error":
+                        msg_erro = dados_api.get("message", "Bloqueado pelo servidor.")
+                        self.registrar_log(f"🛑 {msg_erro}")
+                        self.after(0, lambda m=msg_erro: messagebox.showwarning("Limite de IA", m))
+                        return # Aborta a análise
+                        
+                    chave_dots = dados_api.get("chave_dots", "")
+                    chave_gemini = dados_api.get("chave_gemini", "")
+                    usos_hj = dados_api.get("usos_hoje", 0)
+                    limite_hj = dados_api.get("limite_diario", 0)
+                    
+                    self.registrar_log(f"✅ Autorizado! Consumo atual do CNPJ hoje: {usos_hj} de {limite_hj} análises permitidas.")
+                    
+                    if not chave_dots and not chave_gemini:
+                        relatorio = "⚠️ O Administrador ainda não configurou as chaves de IA na nuvem."
+                        self.after(0, lambda: self.mostrar_janela_analise(relatorio, pdf_texto_puro, arquivos_lista))
+                        return
+                except Exception as e:
+                    self.registrar_log(f"⚠️ Erro ao validar limites na nuvem: {e}")
+                    self.after(0, lambda: messagebox.showerror("Erro de Servidor", "Não foi possível conectar ao gestor de licenças."))
                     return
-                
+
+                # --- Início do Pedido ao OpenRouter/Gemini ---
                 resposta_ia = ""
                 modelo_usado = ""
                 erro_txt = ""
@@ -758,26 +829,18 @@ class BuscadorPNCP(ctk.CTk):
                 {texto_completo[:100000]} 
                 """
 
-                # 1. TENTA DOTS PRIMEIRO (Dots3-Note Preview)
-                # 1. TENTA DOTS PRIMEIRO (Via OpenRouter)
+                # TENTA DOTS PRIMEIRO (Via OpenRouter)
                 if chave_dots:
-                    # Limpa qualquer espaço oculto ou quebra de linha invisível da base de dados
-                    chave_limpa_dots = chave_dots.strip()
-                    
-                    # Imprime as primeiras letras para termos a certeza que a chave correta foi carregada
-                    self.registrar_log(f"🧠 Iniciando análise via DOTS... (Chave lida: {chave_limpa_dots[:12]}...)")
-                    
+                    self.registrar_log("🧠 Iniciando análise via DOTS (Dots-3 Note Preview)...")
                     try:
                         url_dots = "https://openrouter.ai/api/v1/chat/completions" 
-                        
                         payload_dots = {
                             "model": "dots-studio/dots-3-note-preview:free",
                             "messages": [{"role": "user", "content": prompt}],
                             "reasoning": {"enabled": True}
                         }
-                        
                         headers_dots = {
-                            "Authorization": f"Bearer {chave_limpa_dots}", 
+                            "Authorization": f"Bearer {chave_dots.strip()}", 
                             "Content-Type": "application/json",
                             "HTTP-Referer": "https://seu-sistema.com", 
                             "X-Title": "Buscador PNCP"
@@ -796,11 +859,11 @@ class BuscadorPNCP(ctk.CTk):
                         erro_txt += f"• Erro conexão DOTS: {str(e)}\n"
                         self.registrar_log(f"⚠️ Erro no DOTS: {e}. Saltando para Fallback...", apenas_terminal=True)
 
-                # 2. SE DOTS FALHOU OU NÃO EXISTE CHAVE, TENTA GOOGLE GEMINI (Fallback)
+                # SE DOTS FALHOU, TENTA GOOGLE GEMINI (Fallback)
                 if not resposta_ia and chave_gemini:
                     self.registrar_log("🧠 Iniciando análise via Google Gemini (Fallback)...")
                     try:
-                        url_gemini = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-lite-latest:generateContent?key={chave_gemini}"
+                        url_gemini = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-lite-latest:generateContent?key={chave_gemini.strip()}"
                         payload_gemini = {"contents": [{"parts": [{"text": prompt}]}]}
                         
                         for tentativa in range(1, 4):
@@ -810,7 +873,6 @@ class BuscadorPNCP(ctk.CTk):
                                 resposta_ia = res_gemini.json().get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
                                 modelo_usado = "Google Gemini (Secundário/Fallback)"
                                 break 
-                                
                             elif res_gemini.status_code in [503, 429]:
                                 time.sleep(tentativa * 4)
                             else:
@@ -819,9 +881,9 @@ class BuscadorPNCP(ctk.CTk):
                     except Exception as e:
                         erro_txt += f"• Erro conexão Gemini: {str(e)}\n"
                 
-                # 3. COMPILA O RESULTADO
+                # COMPILA O RESULTADO
                 if resposta_ia:
-                    relatorio = f"🧠 ANÁLISE INTELIGENTE | Processado IA\n"
+                    relatorio = f"🧠 ANÁLISE INTELIGENTE | Processado por: IA\n"
                     relatorio += f"📡 FONTES ANALISADAS: {fonte_detalhe}\n"
                     relatorio += "="*80 + "\n\n"
                     relatorio += f"1️⃣ INFORMAÇÕES GERAIS E CONTRATUAIS\n"
@@ -894,36 +956,7 @@ class BuscadorPNCP(ctk.CTk):
                 if url_doc: 
                     ctk.CTkButton(frame_item, text="📥 Abrir / Download", width=140, fg_color="#2980b9", hover_color="#1a5276", font=("Segoe UI", 11, "bold"), command=lambda u=url_doc: webbrowser.open(u)).pack(side="right", padx=10, pady=10)
     
-    # ---------------------------------------------------------
-    # MENU DE CONFIGURAÇÃO DE CHAVES DE API
-    # ---------------------------------------------------------
-    def abrir_janela_chaves_api(self):
-        janela_keys = ctk.CTkToplevel(self)
-        janela_keys.title("Configuração de IA (Chaves de API)")
-        janela_keys.geometry("450x320")
-        janela_keys.transient(self)
-        janela_keys.grab_set()
-
-        ctk.CTkLabel(janela_keys, text="🔑 Chaves de Inteligência Artificial", font=("Segoe UI", 14, "bold")).pack(pady=(20, 10))
-        ctk.CTkLabel(janela_keys, text="Estas chaves são gravadas localmente e criptografadas.", font=("Segoe UI", 10, "italic"), text_color="gray").pack(pady=(0, 15))
-
-        ctk.CTkLabel(janela_keys, text="Chave DOTS (Modelo: Dots3-Note Preview):", font=("Segoe UI", 12, "bold")).pack(anchor="w", padx=20)
-        ent_dots = ctk.CTkEntry(janela_keys, width=400, show="*")
-        ent_dots.pack(padx=20, pady=5)
-        ent_dots.insert(0, self.db.obter_api_key("DOTS"))
-
-        ctk.CTkLabel(janela_keys, text="Chave GOOGLE GEMINI (Modelo: Secundário/Fallback):", font=("Segoe UI", 12, "bold")).pack(anchor="w", padx=20, pady=(15,0))
-        ent_gemini = ctk.CTkEntry(janela_keys, width=400, show="*")
-        ent_gemini.pack(padx=20, pady=5)
-        ent_gemini.insert(0, self.db.obter_api_key("GEMINI"))
-
-        def salvar_chaves():
-            self.db.salvar_api_key("DOTS", ent_dots.get().strip())
-            self.db.salvar_api_key("GEMINI", ent_gemini.get().strip())
-            messagebox.showinfo("Sucesso", "As Chaves de API foram criptografadas e guardadas com segurança no seu dispositivo!")
-            janela_keys.destroy()
-
-        ctk.CTkButton(janela_keys, text="💾 Gravar e Encriptar", fg_color="#27ae60", hover_color="#2ecc71", command=salvar_chaves).pack(pady=20)
+    
 
     # ---------------------------------------------------------
     # UI COMPLETA (Interface Gráfica e Menus)
@@ -956,13 +989,16 @@ class BuscadorPNCP(ctk.CTk):
         self.registrar_log("[SYSTEM] Sistema iniciado. UI Carregada.", apenas_terminal=True)
 
         threading.Thread(target=self._carregar_perfil_empresa_background, daemon=True).start()
+        threading.Thread(target=self._carregar_perfil_empresa_background, daemon=True).start()
+        
+        # INICIA O RADAR INVISÍVEL
+        self.iniciar_motor_radar_background()
 
     def criar_menu_superior(self):
         self.menubar = tk.Menu(self)
         self.menu_opcoes = tk.Menu(self.menubar, tearoff=0)
         self.menu_opcoes.add_command(label="Configurar Colunas da Tabela", command=self.abrir_menu_configuracao)
         self.menu_opcoes.add_separator()
-        self.menu_opcoes.add_command(label="Configurar Chaves de API (IA)", command=self.abrir_janela_chaves_api)
         self.menubar.add_cascade(label="Opções", menu=self.menu_opcoes)
         
         self.menu_sync = tk.Menu(self.menubar, tearoff=0)
@@ -971,6 +1007,8 @@ class BuscadorPNCP(ctk.CTk):
         self.menu_sync.add_command(label="Parar Atualização", command=self.parar_carga_background, state="disabled")
         self.menubar.add_cascade(label="Atualização", menu=self.menu_sync)
         self.config(menu=self.menubar)
+        self.menu_opcoes.add_separator()
+        self.menu_opcoes.add_command(label="Radar Automático e E-mail", command=self.abrir_menu_radar)
 
     def abrir_menu_configuracao(self):
         janela_config = ctk.CTkToplevel(self)
@@ -1207,6 +1245,13 @@ class BuscadorPNCP(ctk.CTk):
             command=self.abrir_janela_analise
         )
         self.btn_analise.pack(side="right", padx=(5, 5))
+        # --- NOVO BOTÃO SININHO (Notificações) ---
+        self.btn_notificacoes = ctk.CTkButton(
+            self.frame_head_tabela, text="🔔 (0)", width=60, 
+            fg_color="#e67e22", hover_color="#d35400", font=("Segoe UI", 12, "bold"),
+            command=self.abrir_janela_notificacoes
+        )
+        self.btn_notificacoes.pack(side="right", padx=(5, 15))
 
         # Tabela Modernizada
         self.frame_tabela = ctk.CTkFrame(self.tab_pesquisa)
@@ -1397,6 +1442,84 @@ class BuscadorPNCP(ctk.CTk):
         if not item_id: return
         valores = self.tree.item(item_id, "values")
         if len(valores) >= 20: webbrowser.open(f"https://pncp.gov.br/app/editais/{valores[17]}/{valores[18]}/{valores[19]}")
+        
+    def atualizar_sininho(self):
+        nao_lidas = len(self.db.obter_notificacoes(apenas_nao_lidas=True))
+        cor = "#e74c3c" if nao_lidas > 0 else "#95a5a6"
+        texto = f"🔔 ({nao_lidas})"
+        if hasattr(self, 'btn_notificacoes'):
+            self.btn_notificacoes.configure(text=texto, fg_color=cor)
+
+    def abrir_janela_notificacoes(self):
+        janela_notif = ctk.CTkToplevel(self)
+        janela_notif.title("Central de Notificações - Radar Automático")
+        janela_notif.geometry("800x500")
+        janela_notif.transient(self)
+        
+        lbl_titulo = ctk.CTkLabel(janela_notif, text="Oportunidades Encontradas pelo Radar:", font=("Segoe UI", 14, "bold"))
+        lbl_titulo.pack(pady=10)
+        
+        frame_lista = ctk.CTkScrollableFrame(janela_notif)
+        frame_lista.pack(fill="both", expand=True, padx=10, pady=10)
+        
+        notificacoes = self.db.obter_notificacoes(apenas_nao_lidas=False)
+        if not notificacoes:
+            ctk.CTkLabel(frame_lista, text="Nenhuma oportunidade nova encontrada ainda.").pack(pady=20)
+        else:
+            for notif in notificacoes:
+                cor_fundo = "#ecf0f1" if notif[4] else "#d4efdf" # Verde se não lida
+                frame_item = ctk.CTkFrame(frame_lista, fg_color=cor_fundo, corner_radius=5)
+                frame_item.pack(fill="x", pady=5, padx=2)
+                ctk.CTkLabel(frame_item, text=f"🏢 {notif[1]}\n🎯 {notif[2]}", font=("Segoe UI", 11), justify="left", wraplength=600).pack(side="left", padx=10, pady=10, fill="x", expand=True)
+                ctk.CTkButton(frame_item, text="Abrir Link", width=100, command=lambda u=notif[3]: webbrowser.open(u)).pack(side="right", padx=10)
+        
+        self.db.marcar_notificacoes_lidas()
+        self.atualizar_sininho()
+
+    def abrir_menu_radar(self):
+        janela_radar = ctk.CTkToplevel(self)
+        janela_radar.title("Configurar Radar Automático e Alertas")
+        janela_radar.geometry("500x550")
+        janela_radar.transient(self)
+        janela_radar.grab_set()
+
+        config = self.db.obter_config_alertas()
+
+        st_frame = ctk.CTkScrollableFrame(janela_radar)
+        st_frame.pack(fill="both", expand=True, padx=10, pady=10)
+
+        ctk.CTkLabel(st_frame, text="1. Filtros de Busca Automática", font=("Segoe UI", 12, "bold")).pack(anchor="w", pady=(10,5))
+        ctk.CTkLabel(st_frame, text="Palavras-Chave (separadas por vírgula):").pack(anchor="w")
+        ent_pal = ctk.CTkEntry(st_frame, width=450)
+        ent_pal.insert(0, config["palavras"]); ent_pal.pack(pady=5)
+        
+        col1, col2 = ctk.CTkFrame(st_frame, fg_color="transparent"), ctk.CTkFrame(st_frame, fg_color="transparent")
+        col1.pack(fill="x"); col2.pack(fill="x", pady=5)
+        ctk.CTkLabel(col1, text="Estado (UF):").pack(side="left")
+        combo_uf = ctk.CTkOptionMenu(col1, values=self.lista_ufs, width=100); combo_uf.set(config["uf"] or "Todas"); combo_uf.pack(side="left", padx=10)
+        
+        ctk.CTkLabel(col2, text="Modalidade:").pack(side="left")
+        combo_mod = ctk.CTkOptionMenu(col2, values=list(self.modalidades_map.keys()), width=200); combo_mod.set(config["modalidade"] or "Principais (Pregão, Dispensa, Conc.)"); combo_mod.pack(side="left", padx=10)
+
+        ctk.CTkLabel(st_frame, text="2. Configuração de E-mail (Gmail)", font=("Segoe UI", 12, "bold")).pack(anchor="w", pady=(20,5))
+        ctk.CTkLabel(st_frame, text="E-mail de Destino (Quem recebe):").pack(anchor="w")
+        ent_dest = ctk.CTkEntry(st_frame, width=450)
+        ent_dest.insert(0, config["destino"]); ent_dest.pack(pady=5)
+
+        ctk.CTkLabel(st_frame, text="Seu E-mail Remetente (Conta do Sistema):").pack(anchor="w")
+        ent_remet = ctk.CTkEntry(st_frame, width=450)
+        ent_remet.insert(0, config["remetente"]); ent_remet.pack(pady=5)
+
+        ctk.CTkLabel(st_frame, text="Senha de App do Gmail (Não é a senha normal!):").pack(anchor="w")
+        ent_senha = ctk.CTkEntry(st_frame, width=450, show="*")
+        ent_senha.insert(0, config["senha"]); ent_senha.pack(pady=5)
+
+        def salvar():
+            self.db.salvar_config_alertas(ent_dest.get(), ent_remet.get(), ent_senha.get(), ent_pal.get(), combo_uf.get(), combo_mod.get())
+            messagebox.showinfo("Sucesso", "Radar configurado! O sistema buscará as oportunidades em background.")
+            janela_radar.destroy()
+            
+        ctk.CTkButton(st_frame, text="💾 Salvar e Ativar Radar", fg_color="#27ae60", hover_color="#2ecc71", command=salvar).pack(pady=20)    
 
     # ---------------------------------------------------------
     # OPERAÇÕES DE BUSCA E SINCRONIZAÇÃO
@@ -1689,6 +1812,91 @@ class BuscadorPNCP(ctk.CTk):
         if not self.is_carga_running: self.lbl_status.configure(text="Erro ao executar busca.", text_color="#e74c3c")
         self.btn_buscar.configure(text="🔍 Pesquisar", fg_color=self.default_btn_buscar_fg, hover_color=self.default_btn_buscar_hover, command=self.iniciar_busca, state="normal")
         messagebox.showerror("Erro na Busca", f"Falha na consulta: {msg_erro}")
+        
+    def iniciar_motor_radar_background(self):
+        # Atualiza o sino logo que abre o app
+        self.atualizar_sininho()
+        # Inicia a thread infinita
+        threading.Thread(target=self._loop_radar_automatico, daemon=True).start()
+
+    def _loop_radar_automatico(self):
+        time.sleep(30) # Espera 30 segundos após abrir o programa antes da primeira verificação
+        while True:
+            config = self.db.obter_config_alertas()
+            palavras_raw = config.get("palavras", "").strip()
+            
+            if palavras_raw and config.get("remetente") and config.get("senha") and config.get("destino"):
+                self.registrar_log("📡 [RADAR] Iniciando varredura automática silenciosa...", apenas_terminal=True)
+                
+                try:
+                    # Configura a busca para HOJE
+                    hoje_str = datetime.datetime.now().strftime("%Y%m%d")
+                    mod_id = self.modalidades_map.get(config.get("modalidade", ""), "")
+                    uf = config.get("uf", "Todas")
+                    grupos_busca = Utils.extrair_grupos_radicais(palavras_raw)
+                    
+                    url_base = "https://pncp.gov.br/api/consulta/v1/contratacoes/publicacao"
+                    params = {"dataInicial": hoje_str, "dataFinal": hoje_str, "pagina": "1", "tamanhoPagina": "200"}
+                    if mod_id: params["codigoModalidadeContratacao"] = mod_id
+                    if uf != "Todas": params["uf"] = uf
+
+                    res = self._get_com_retentativa(url_base, params=params, timeout=15, tipo_operacao="busca")
+                    novas_oportunidades = []
+                    
+                    if res and res.status_code == 200:
+                        lista_contratos = res.json().get("data", [])
+                        for contrato in lista_contratos:
+                            orgao = contrato.get("orgaoEntidade", {}).get("razaoSocial", "N/I")
+                            objeto = contrato.get("objeto", "")
+                            
+                            if Utils.texto_atende_busca(objeto, grupos_busca):
+                                cnpj = contrato.get("orgaoEntidade", {}).get("cnpj")
+                                ano = contrato.get("anoCompra")
+                                seq = contrato.get("sequencialCompra")
+                                chave = f"{cnpj}_{ano}_{seq}"
+                                link = f"https://pncp.gov.br/app/editais/{cnpj}/{ano}/{seq}"
+                                
+                                # Se inseriu no banco (não era repetida), guarda para enviar email
+                                if self.db.registrar_notificacao_nova(chave, orgao, objeto, link):
+                                    novas_oportunidades.append({"orgao": orgao, "objeto": objeto, "link": link})
+                    
+                    if novas_oportunidades:
+                        self.registrar_log(f"🔔 [RADAR] Encontradas {len(novas_oportunidades)} novas oportunidades! Enviando e-mail...", apenas_terminal=False)
+                        self.after(0, self.atualizar_sininho)
+                        self._enviar_email_radar(config, novas_oportunidades)
+
+                except Exception as e:
+                    self.registrar_log(f"⚠️ [RADAR ERROR] Falha na varredura: {e}", apenas_terminal=True)
+            
+            # Dorme por 3 horas (10800 segundos) até à próxima verificação
+            time.sleep(10800)
+
+    def _enviar_email_radar(self, config, oportunidades):
+        try:
+            remetente = config["remetente"]
+            senha = config["senha"]
+            destino = config["destino"]
+            
+            msg = MIMEMultipart("alternative")
+            msg["Subject"] = f"🔔 Radar PNCP: {len(oportunidades)} Novas Oportunidades Encontradas!"
+            msg["From"] = remetente
+            msg["To"] = destino
+            
+            html = f"<h2>O Radar Automático encontrou novas licitações para as suas palavras-chave!</h2><hr>"
+            for op in oportunidades:
+                html += f"<p><b>🏢 Órgão:</b> {op['orgao']}<br>"
+                html += f"<b>🎯 Objeto:</b> {op['objeto']}<br>"
+                html += f"🔗 <a href='{op['link']}'>Clique aqui para aceder ao Edital no PNCP</a></p><br>"
+            
+            msg.attach(MIMEText(html, "html"))
+            
+            with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+                server.login(remetente, senha)
+                server.send_message(msg)
+                
+            self.registrar_log("✅ [RADAR] E-mail enviado com sucesso!", apenas_terminal=True)
+        except Exception as e:
+            self.registrar_log(f"⚠️ [RADAR EMAIL ERROR] Falha ao enviar e-mail: {e}", apenas_terminal=True)
 
 if __name__ == "__main__":
     try:
