@@ -752,7 +752,9 @@ class BuscadorPNCP(ctk.CTk):
             # ETAPA 2: LISTAR ARQUIVOS E VARREDURA MULTI-PDF
             self.registrar_log("🤖 Procurando ficheiros e anexos do Edital...")
             url_arquivos = f"https://pncp.gov.br/api/pncp/v1/orgaos/{cnpj}/compras/{ano}/{seq}/arquivos"
-            res_arq = self._get_com_retentativa(url_arquivos, params={"pagina":1, "tamanhoPagina":50}, timeout=10, tipo_operacao="busca")
+            
+            # Força a API a trazer até 50 anexos de uma só vez para não perder o Termo de Referência
+            res_arq = self._get_com_retentativa(url_arquivos, params={"pagina": "1", "tamanhoPagina": "50"}, timeout=15, tipo_operacao="busca")
             
             arquivos_lista = []
             pdf_texto_puro = ""
@@ -763,37 +765,39 @@ class BuscadorPNCP(ctk.CTk):
                 elif isinstance(dados_arq, list): arquivos_lista = dados_arq
                     
                 if HAS_PYPDF and arquivos_lista:
-                    self.registrar_log("📄 Lendo múltiplos PDFs...")
+                    self.registrar_log("📄 Baixando e lendo TODOS os anexos PDF...")
                     pdfs_lidos = 0
                     for arq in arquivos_lista:
-                        titulo = (arq.get("titulo", "")).lower()
-                        tipo = (arq.get("tipoDocumentoNome", "")).lower()
+                        titulo = arq.get("titulo", "documento_sem_nome").upper()
                         url_pdf = arq.get("url")
                         
-                        # Tenta extrair até 4 PDFs relevantes para ter visão geral sem estourar limite da IA
-                        if url_pdf and pdfs_lidos < 4:
-                            if "edital" in titulo or "termo" in titulo or "anexo" in titulo or url_pdf.endswith(".pdf"):
-                                try:
-                                    res_pdf = self.http_session.get(url_pdf, timeout=20)
-                                    if res_pdf.status_code == 200:
-                                        pdf_file = io.BytesIO(res_pdf.content)
-                                        leitor = pypdf.PdfReader(pdf_file)
-                                        
-                                        # Identificador visual para o texto extraído
-                                        pdf_texto_puro += f"\n\n{'='*40}\nDOCUMENTO: {titulo.upper()}\n{'='*40}\n"
-                                        
-                                        # Lê no máximo 30 páginas por PDF para não saturar
-                                        for i in range(min(30, len(leitor.pages))): 
-                                            ext = leitor.pages[i].extract_text()
-                                            if ext: 
-                                                pdf_texto_puro += f"\n--- PÁG {i+1} ---\n" + ext
-                                        pdfs_lidos += 1
-                                except Exception as epdf:
-                                    self.registrar_log(f"⚠️ Erro ao ler PDF {titulo}: {epdf}", apenas_terminal=True)
+                        # Processa TUDO o que for PDF (sem limite de 4 arquivos)
+                        if url_pdf and url_pdf.lower().endswith(".pdf"):
+                            try:
+                                self.registrar_log(f"📥 Baixando anexo: {titulo}...", apenas_terminal=True)
+                                res_pdf = self.http_session.get(url_pdf, timeout=30)
+                                
+                                if res_pdf.status_code == 200:
+                                    pdf_file = io.BytesIO(res_pdf.content)
+                                    leitor = pypdf.PdfReader(pdf_file)
+                                    
+                                    # Identificador visual claro para a IA saber qual é o documento
+                                    pdf_texto_puro += f"\n\n{'='*40}\n--- INÍCIO DO DOCUMENTO: {titulo} ---\n{'='*40}\n\n"
+                                    
+                                    # Extrai o texto de TODAS as páginas (limite de segurança elevado para 150 páginas por anexo)
+                                    for i in range(min(150, len(leitor.pages))): 
+                                        ext = leitor.pages[i].extract_text()
+                                        if ext: 
+                                            pdf_texto_puro += ext + "\n"
+                                            
+                                    pdfs_lidos += 1
+                                    
+                            except Exception as epdf:
+                                self.registrar_log(f"⚠️ Erro ao ler PDF {titulo}: {epdf}", apenas_terminal=True)
                                     
                     if pdf_texto_puro.strip():
                         texto_completo += "\n" + pdf_texto_puro
-                        fonte_detalhe += f" + 📄 Leitura de {pdfs_lidos} ficheiro(s) PDF"
+                        fonte_detalhe += f" + 📄 Leitura de {pdfs_lidos} ficheiro(s) PDF (Anexos Completos)"
                     else:
                         pdf_texto_puro = "⚠️ O texto dos PDFs não pôde ser extraído."
 
@@ -1954,34 +1958,49 @@ class BuscadorPNCP(ctk.CTk):
                     grupos_busca = Utils.extrair_grupos_radicais(palavras_raw)
                     
                     url_base = "https://pncp.gov.br/api/consulta/v1/contratacoes/publicacao"
-                    params = {"dataInicial": hoje_str, "dataFinal": hoje_str, "pagina": "1", "tamanhoPagina": "200"}
-                    if mod_id: params["codigoModalidadeContratacao"] = mod_id
-                    if uf != "Todas": params["uf"] = uf
-
-                    res = self._get_com_retentativa(url_base, params=params, timeout=15, tipo_operacao="busca")
+                    
+                    # Se não houver uma modalidade específica mapeada, varre as 3 principais:
+                    # 8 = Pregão, 6 = Dispensa, 2 = Concorrência
+                    modalidades_busca = [mod_id] if mod_id else ["8", "6", "2"]
+                    
                     novas_oportunidades = []
                     
-                    if res and res.status_code == 200:
-                        lista_contratos = res.json().get("data", [])
-                        for contrato in lista_contratos:
-                            orgao = contrato.get("orgaoEntidade", {}).get("razaoSocial", "N/I")
-                            objeto = contrato.get("objeto", "")
-                            
-                            if Utils.texto_atende_busca(objeto, grupos_busca):
-                                cnpj = contrato.get("orgaoEntidade", {}).get("cnpj")
-                                ano = contrato.get("anoCompra")
-                                seq = contrato.get("sequencialCompra")
-                                chave = f"{cnpj}_{ano}_{seq}"
-                                link = f"https://pncp.gov.br/app/editais/{cnpj}/{ano}/{seq}"
+                    for m_id in modalidades_busca:
+                        params = {
+                            "dataInicial": hoje_str, 
+                            "dataFinal": hoje_str, 
+                            "pagina": "1", 
+                            "tamanhoPagina": "50",
+                            "codigoModalidadeContratacao": m_id
+                        }
+                        if uf != "Todas": 
+                            params["uf"] = uf
+
+                        res = self._get_com_retentativa(url_base, params=params, timeout=15, tipo_operacao="busca")
+                        
+                        if res and res.status_code == 200:
+                            lista_contratos = res.json().get("data", [])
+                            for contrato in lista_contratos:
+                                orgao = contrato.get("orgaoEntidade", {}).get("razaoSocial", "N/I")
+                                objeto = contrato.get("objeto", "")
                                 
-                                # Se inseriu no banco (não era repetida), guarda para enviar email
-                                if self.db.registrar_notificacao_nova(chave, orgao, objeto, link):
-                                    novas_oportunidades.append({"orgao": orgao, "objeto": objeto, "link": link})
+                                if Utils.texto_atende_busca(objeto, grupos_busca):
+                                    cnpj = contrato.get("orgaoEntidade", {}).get("cnpj")
+                                    ano = contrato.get("anoCompra")
+                                    seq = contrato.get("sequencialCompra")
+                                    chave = f"{cnpj}_{ano}_{seq}"
+                                    link = f"https://pncp.gov.br/app/editais/{cnpj}/{ano}/{seq}"
+                                    
+                                    # Se inseriu no banco (não era repetida), guarda para enviar email
+                                    if self.db.registrar_notificacao_nova(chave, orgao, objeto, link):
+                                        novas_oportunidades.append({"orgao": orgao, "objeto": objeto, "link": link})
                     
                     if novas_oportunidades:
                         self.registrar_log(f"🔔 [RADAR] Encontradas {len(novas_oportunidades)} novas oportunidades! Enviando e-mail...", apenas_terminal=False)
                         self.after(0, self.atualizar_sininho)
                         self._enviar_email_radar(config, novas_oportunidades)
+                        
+                        # Envia a telemetria do radar para a nuvem
                         threading.Thread(target=self._enviar_telemetria_background, args=(len(novas_oportunidades),), daemon=True).start()
 
                 except Exception as e:
