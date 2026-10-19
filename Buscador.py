@@ -717,7 +717,6 @@ class BuscadorPNCP(ctk.CTk):
         try:
             self.registrar_log("🤖 A transferir Resumo Base do PNCP...")
             url_compra = f"https://pncp.gov.br/api/consulta/v1/orgaos/{cnpj}/compras/{ano}/{seq}"
-            
             res = self._get_com_retentativa(url_compra, params={}, timeout=10, tipo_operacao="busca")
             
             objeto = info_comp = ""
@@ -732,204 +731,278 @@ class BuscadorPNCP(ctk.CTk):
                 julgamento = dados.get("criterioJulgamento", {}).get("nome", "Não informado")
                 modo_disputa = dados.get("modoDisputa", {}).get("nome", "Não informado")
                 valor_total = dados.get("valorTotalEstimado", 0.0)
-            else:
-                self.registrar_log("⚠️ Fallback ativado. Usando BD Local...")
-                linhas = self.db.executar_leitura("SELECT objeto_contrato, vlr_total_est, modalidade_nome FROM editais_itens WHERE cnpj=? AND ano=? AND sequencial=? LIMIT 1", (cnpj, ano, seq))
-                if linhas:
-                    objeto = linhas[0][0]
-                    modo_disputa = linhas[0][2]
-                    try:
-                        v_str = str(linhas[0][1]).replace("R$ ", "").replace(".", "").replace(",", ".")
-                        valor_total = float(v_str) if v_str != "Não informado" else 0.0
-                    except: valor_total = 0.0
-                else:
-                    self.after(0, lambda: messagebox.showinfo("Análise", "Dados indisponíveis."))
-                    return
 
-            texto_completo = f"{objeto}\n{info_comp}\n"
-            fonte_detalhe = "🌐 Resumo PNCP"
-            
-            # ETAPA 2: LISTAR ARQUIVOS E VARREDURA MULTI-PDF
-            self.registrar_log("🤖 Procurando ficheiros e anexos do Edital...")
-            url_arquivos = f"https://pncp.gov.br/api/pncp/v1/orgaos/{cnpj}/compras/{ano}/{seq}/arquivos"
-            
-            # Força a API a trazer até 50 anexos de uma só vez para não perder o Termo de Referência
-            res_arq = self._get_com_retentativa(url_arquivos, params={"pagina": "1", "tamanhoPagina": "50"}, timeout=15, tipo_operacao="busca")
-            
-            arquivos_lista = []
-            pdf_texto_puro = ""
+            texto_resumo_pncp = f"{objeto}\n{info_comp}\n"
+            fonte_detalhe = "🌐 Resumo Básico PNCP"
 
-            if res_arq and res_arq.status_code == 200:
-                dados_arq = res_arq.json()
-                if isinstance(dados_arq, dict): arquivos_lista = dados_arq.get("data", [])
-                elif isinstance(dados_arq, list): arquivos_lista = dados_arq
-                    
-                if HAS_PYPDF and arquivos_lista:
-                    self.registrar_log("📄 Baixando e lendo TODOS os anexos PDF...")
-                    pdfs_lidos = 0
-                    for arq in arquivos_lista:
-                        titulo = arq.get("titulo", "documento_sem_nome").upper()
-                        url_pdf = arq.get("url")
-                        
-                        # Processa TUDO o que for PDF (sem limite de 4 arquivos)
-                        if url_pdf and url_pdf.lower().endswith(".pdf"):
-                            try:
-                                self.registrar_log(f"📥 Baixando anexo: {titulo}...", apenas_terminal=True)
-                                res_pdf = self.http_session.get(url_pdf, timeout=30)
-                                
-                                if res_pdf.status_code == 200:
-                                    pdf_file = io.BytesIO(res_pdf.content)
-                                    leitor = pypdf.PdfReader(pdf_file)
-                                    
-                                    # Identificador visual claro para a IA saber qual é o documento
-                                    pdf_texto_puro += f"\n\n{'='*40}\n--- INÍCIO DO DOCUMENTO: {titulo} ---\n{'='*40}\n\n"
-                                    
-                                    # Extrai o texto de TODAS as páginas (limite de segurança elevado para 150 páginas por anexo)
-                                    for i in range(min(150, len(leitor.pages))): 
-                                        ext = leitor.pages[i].extract_text()
-                                        if ext: 
-                                            pdf_texto_puro += ext + "\n"
-                                            
-                                    pdfs_lidos += 1
-                                    
-                            except Exception as epdf:
-                                self.registrar_log(f"⚠️ Erro ao ler PDF {titulo}: {epdf}", apenas_terminal=True)
-                                    
-                    if pdf_texto_puro.strip():
-                        texto_completo += "\n" + pdf_texto_puro
-                        fonte_detalhe += f" + 📄 Leitura de {pdfs_lidos} ficheiro(s) PDF (Anexos Completos)"
-                    else:
-                        pdf_texto_puro = "⚠️ O texto dos PDFs não pôde ser extraído."
-
-            # =====================================================================
-            # ETAPA 3: IA GENERATIVA (Validada pela Nuvem / Vercel)
-            # =====================================================================
+            # =======================================================
+            # VERIFICAÇÃO INTELIGENTE DO CACHE (BANCO DE DADOS)
+            # =======================================================
             analise_salva = self.db.carregar_analise_ia(cnpj, ano, seq)
-            
             if analise_salva:
-                self.registrar_log("✅ Análise instantânea: Carregada da Base de Dados Local (Sem consumir limite da Nuvem).")
-                relatorio = analise_salva
-            else:
-                self.registrar_log("🔄 Verificando permissões e limites na Nuvem...")
+                texto_min = analise_salva.lower()
+                # Conta quantas respostas foram negativas/inconclusivas
+                faltas_salva = (texto_min.count("não mencionado") + 
+                                texto_min.count("não informado") + 
+                                texto_min.count("não localizado") + 
+                                texto_min.count("inconclusivo"))
                 
-                # 1. Bate na API para incrementar o contador e pegar as chaves
-                url_api_ia = self.url_api_licenca.replace("/valida", "/ia_uso") # Constrói a URL dinamicamente
-                payload_ia = {"cnpj": self.cnpj_ativo,
-                              "hwid": str(uuid.getnode()), 
-                              "maquina": platform.node(), 
-                              "incrementar": True}
-                
-                try:
-                    res_api = requests.post(url_api_ia, json=payload_ia, timeout=10)
-                    dados_api = res_api.json()
-                    
-                    if dados_api.get("status") == "error":
-                        msg_erro = dados_api.get("message", "Bloqueado pelo servidor.")
-                        self.registrar_log(f"🛑 {msg_erro}")
-                        self.after(0, lambda m=msg_erro: messagebox.showwarning("Limite de IA", m))
-                        return # Aborta a análise
-                        
-                    chave_dots = dados_api.get("chave_dots", "")
-                    chave_gemini = dados_api.get("chave_gemini", "")
-                    usos_hj = dados_api.get("usos_hoje", 0)
-                    limite_hj = dados_api.get("limite_diario", 0)
-                    
-                    self.registrar_log(f"✅ Autorizado! Consumo atual do CNPJ hoje: {usos_hj} de {limite_hj} análises permitidas.")
-                    
-                    if not chave_dots and not chave_gemini:
-                        relatorio = "⚠️ O Administrador ainda não configurou as chaves de IA na nuvem."
-                        self.after(0, lambda: self.mostrar_janela_analise(relatorio, pdf_texto_puro, arquivos_lista))
-                        return
-                except Exception as e:
-                    self.registrar_log(f"⚠️ Erro ao validar limites na nuvem: {e}")
-                    self.after(0, lambda: messagebox.showerror("Erro de Servidor", "Não foi possível conectar ao gestor de licenças."))
+                refazer = False
+                # Se a análise antiga for pobre (4 ou mais faltas), pergunta ao utilizador se quer refazer
+                if faltas_salva >= 4:
+                    evento_refazer = threading.Event()
+                    resposta_user = {}
+
+                    def perguntar_refazer():
+                        resposta_user["refazer"] = messagebox.askyesno(
+                            "Análise Salva Incompleta", 
+                            f"Identificámos que a análise salva no banco de dados está incompleta (faltam cerca de {faltas_salva} informações vitais).\n\nDeseja realizar uma NOVA ANÁLISE agora (podendo carregar PDFs) para tentar extrair todos os dados?",
+                            parent=self
+                        )
+                        evento_refazer.set()
+
+                    self.after(0, perguntar_refazer)
+                    evento_refazer.wait() # Aguarda a resposta do utilizador
+                    refazer = resposta_user.get("refazer", False)
+
+                if not refazer:
+                    self.registrar_log("✅ Análise instantânea: Carregada da Base de Dados Local.")
+                    self.after(0, lambda: self.mostrar_janela_analise(analise_salva, "⚠️ Análise carregada do cache (Sem leitura de PDF necessária).", []))
                     return
+                else:
+                    self.registrar_log("🔄 O utilizador optou por refazer a análise incompleta salva no banco.")
 
-                # --- Início do Pedido ao OpenRouter/Gemini ---
-                resposta_ia = ""
-                modelo_usado = ""
-                erro_txt = ""
+            # =======================================================
+            # PREPARAÇÃO DA NOVA ANÁLISE
+            # =======================================================
+            self.registrar_log("🔄 Verificando permissões e chaves na Nuvem (Sem descontar limite ainda)...")
+            url_api_ia = self.url_api_licenca.replace("/valida", "/ia_uso") 
+            
+            payload_verificacao = {"cnpj": self.cnpj_ativo, "hwid": str(uuid.getnode()), "maquina": platform.node(), "incrementar": False}
+            
+            try:
+                res_api = requests.post(url_api_ia, json=payload_verificacao, timeout=10)
+                dados_api = res_api.json()
+                if dados_api.get("status") == "error" or dados_api.get("usos_hoje", 0) >= dados_api.get("limite_diario", 10):
+                    msg_erro = dados_api.get("message", "Limite diário de análises atingido ou bloqueado.")
+                    self.registrar_log(f"🛑 {msg_erro}")
+                    self.after(0, lambda m=msg_erro: messagebox.showwarning("Limite de IA", m))
+                    return 
+                    
+                chave_dots = dados_api.get("chave_dots", "")
+                chave_gemini = dados_api.get("chave_gemini", "")
+            except Exception as e:
+                self.registrar_log(f"⚠️ Erro ao comunicar com a nuvem: {e}")
+                self.after(0, lambda: messagebox.showerror("Erro de Servidor", "Não foi possível conectar ao gestor de licenças."))
+                return
 
+            # Função interna para chamar a IA
+            def chamar_ia(texto_base):
                 prompt = f"""
                 Aja como um advogado especialista em Licitações Públicas no Brasil.
-                Analise o texto do edital (e seus anexos) fornecido abaixo e extraia os pontos críticos com base nas informações literais encontradas.
-                Formate a sua resposta em tópicos claros. Use emojis para ilustrar. 
-                Se uma informação não estiver explícita, responda rigorosamente "Não mencionado no texto extraído".
-                Não invente dados.
+                Analise o texto abaixo e extraia os pontos críticos literais. 
+                Se não estiver explícito, responda rigorosamente "Não mencionado". Não invente dados.
                 
-                Por favor, traga exatamente estes tópicos:
-                - 📦 Objeto Resumido: (Qual é o principal foco da contratação em 2 frases?)
+                - 📦 Objeto Resumido: 
                 - 📍 Local de Entrega/Execução: 
                 - ⏳ Prazo de Entrega e Vigência:
-                - 📦 Regime de Fornecimento: (Único, parcelado, contínuo ou sob demanda?)
+                - 📦 Regime de Fornecimento: 
                 - 💸 Prazo e Condição de Pagamento:
                 - 🧪 Exigência de Amostras:
-                - 🛡️ Garantia Contratual: (Exige caução ou seguro-garantia?)
-                - 💰 Qualificação Econômico-Financeira: (Exige balanço patrimonial ou capital mínimo?)
+                - 🛡️ Garantia Contratual: 
+                - 💰 Qualificação Econômico-Financeira: 
                 - 🗺️ Vistoria/Visita Técnica:
                 - 🏢 Participação Exclusiva ou Cotas para ME/EPP:
-                - 📜 Certificações/Registros Específicos: (ANVISA, INMETRO, CREA, Alvarás, etc.)
-                - 🤝 Subcontratação: (É permitida?)
+                - 📜 Certificações/Registros Específicos: 
+                - 🤝 Subcontratação: 
 
-                --- TEXTO DO EDITAL E ANEXOS PARA ANÁLISE ---
-                {texto_completo[:100000]} 
+                --- TEXTO PARA ANÁLISE ---
+                {texto_base[:90000]} 
                 """
 
-                # TENTA DOTS PRIMEIRO (Via OpenRouter)
+                resp, modelo = "", ""
                 if chave_dots:
-                    self.registrar_log("🧠 Iniciando análise via DOTS (Dots-3 Note Preview)...")
                     try:
-                        url_dots = "https://openrouter.ai/api/v1/chat/completions" 
-                        payload_dots = {
-                            "model": "dots-studio/dots-3-note-preview:free",
-                            "messages": [{"role": "user", "content": prompt}],
-                            "reasoning": {"enabled": True}
-                        }
-                        headers_dots = {
-                            "Authorization": f"Bearer {chave_dots.strip()}", 
-                            "Content-Type": "application/json",
-                            "HTTP-Referer": "https://seu-sistema.com", 
-                            "X-Title": "Buscador PNCP"
-                        }
-                        
-                        res_dots = requests.post(url_dots, json=payload_dots, headers=headers_dots, timeout=90)
-                        
+                        res_dots = requests.post("https://openrouter.ai/api/v1/chat/completions", 
+                            json={"model": "dots-studio/dots-3-note-preview:free", "messages": [{"role": "user", "content": prompt}], "reasoning": {"enabled": True}}, 
+                            headers={"Authorization": f"Bearer {chave_dots.strip()}", "Content-Type": "application/json", "HTTP-Referer": "https://seu-sistema.com"}, timeout=90)
                         if res_dots.status_code == 200:
-                            dados_dots = res_dots.json()
-                            resposta_ia = dados_dots.get("choices", [{}])[0].get("message", {}).get("content", "")
-                            modelo_usado = "Dots-3 Note Preview (OpenRouter - Primário)"
-                        else:
-                            erro_txt += f"• DOTS ({res_dots.status_code}): {res_dots.text}\n"
-                            self.registrar_log(f"⚠️ Falha no DOTS: HTTP {res_dots.status_code}. Saltando para Fallback...", apenas_terminal=True)
-                    except Exception as e:
-                        erro_txt += f"• Erro conexão DOTS: {str(e)}\n"
-                        self.registrar_log(f"⚠️ Erro no DOTS: {e}. Saltando para Fallback...", apenas_terminal=True)
-
-                # SE DOTS FALHOU, TENTA GOOGLE GEMINI (Fallback)
-                if not resposta_ia and chave_gemini:
-                    self.registrar_log("🧠 Iniciando análise via Google Gemini (Fallback)...")
-                    try:
-                        url_gemini = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-lite-latest:generateContent?key={chave_gemini.strip()}"
-                        payload_gemini = {"contents": [{"parts": [{"text": prompt}]}]}
-                        
-                        for tentativa in range(1, 4):
-                            res_gemini = requests.post(url_gemini, json=payload_gemini, timeout=60)
-                            
-                            if res_gemini.status_code == 200:
-                                resposta_ia = res_gemini.json().get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
-                                modelo_usado = "Google Gemini (Secundário/Fallback)"
-                                break 
-                            elif res_gemini.status_code in [503, 429]:
-                                time.sleep(tentativa * 4)
-                            else:
-                                erro_txt += f"• Gemini ({res_gemini.status_code}): {res_gemini.text}\n"
-                                break 
-                    except Exception as e:
-                        erro_txt += f"• Erro conexão Gemini: {str(e)}\n"
+                            resp = res_dots.json().get("choices", [{}])[0].get("message", {}).get("content", "")
+                            modelo = "DOTS-3 Preview"
+                    except: pass
                 
-                # COMPILA O RESULTADO
-                if resposta_ia:
-                    relatorio = f"🧠 ANÁLISE INTELIGENTE | Processado por: IA\n"
+                if not resp and chave_gemini:
+                    try:
+                        res_gemini = requests.post(f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-8b:generateContent?key={chave_gemini.strip()}", 
+                            json={"contents": [{"parts": [{"text": prompt}]}]}, timeout=90)
+                        if res_gemini.status_code == 200:
+                            resp = res_gemini.json().get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+                            modelo = "Gemini Flash Lite"
+                    except: pass
+                return resp, modelo
+
+            # =======================================================
+            # 1ª PASSAGEM (RÁPIDA) - Apenas o resumo da API
+            # =======================================================
+            self.registrar_log("🧠 Iniciando Passagem 1: Analisando Resumo Rápido da API...")
+            resposta_ia, modelo_usado = chamar_ia(texto_resumo_pncp)
+            arquivos_lista = []
+            pdf_texto_puro = ""
+            
+            faltas = resposta_ia.lower().count("não mencionado") if resposta_ia else 12
+
+            # =======================================================
+            # 2ª PASSAGEM (PROFUNDA) - Pede intervenção do utilizador
+            # =======================================================
+            if faltas >= 4:
+                self.registrar_log(f"⚠️ Passagem 1 Inconclusiva (Faltam {faltas} informações vitais). Preparando extração de PDF...")
+                url_arquivos = f"https://pncp.gov.br/api/pncp/v1/orgaos/{cnpj}/compras/{ano}/{seq}/arquivos"
+                res_arq = self._get_com_retentativa(url_arquivos, params={"pagina": "1", "tamanhoPagina": "50"}, timeout=15, tipo_operacao="busca")
+                
+                if res_arq and res_arq.status_code == 200:
+                    dados_arq = res_arq.json()
+                    arquivos_lista = dados_arq.get("data", []) if isinstance(dados_arq, dict) else dados_arq
+                    
+                if HAS_PYPDF:
+                    evento_selecao = threading.Event()
+                    arquivos_escolhidos_pelo_user = []
+                    arquivos_locais_selecionados = []
+                    estado_janela = {"cancelado": False} 
+
+                    def abrir_modal_selecao():
+                        janela_sel = ctk.CTkToplevel(self)
+                        janela_sel.title("Intervenção Necessária - Seleção de Arquivos")
+                        janela_sel.geometry("680x550") 
+                        janela_sel.attributes('-topmost', True)
+                        janela_sel.grab_set()
+
+                        ctk.CTkLabel(janela_sel, text="O resumo oficial não contém todas as informações.", font=("Segoe UI", 13, "bold"), text_color="#e74c3c").pack(pady=(10, 0))
+                        
+                        # FILTRO ONLINE CORRIGIDO: Mostra todos os ficheiros que NÃO sejam ZIP, RAR ou 7Z.
+                        arquivos_validos = [a for a in arquivos_lista if not str(a.get("titulo", "")).lower().endswith((".zip", ".rar", ".7z"))]
+                        tem_zip = any(str(a.get("titulo", "")).lower().endswith((".zip", ".rar", ".7z")) for a in arquivos_lista)
+
+                        if not arquivos_validos and tem_zip:
+                            ctk.CTkLabel(janela_sel, text="⚠️ Apenas arquivos compactados (.ZIP/.RAR) encontrados online!\n\n1. Clique no botão abaixo para ver e baixar os anexos.\n2. Extraia os arquivos no seu computador.\n3. Em seguida, clique em 'Carregar PDF do PC'.", text_color="#d35400", font=("Segoe UI", 12, "bold")).pack(pady=(5, 10))
+                            ctk.CTkButton(janela_sel, text="📥 Ver e Baixar Anexos (.ZIP)", fg_color="#e67e22", hover_color="#d35400", command=lambda: self.mostrar_janela_arquivos(arquivos_lista)).pack(pady=5)
+                        elif arquivos_validos:
+                            ctk.CTkLabel(janela_sel, text="Selecione os Documentos/PDFs online ou carregue do seu computador:").pack(pady=(0, 10))
+                        else:
+                            ctk.CTkLabel(janela_sel, text="Nenhum ficheiro online suportado. Carregue o Edital a partir do seu computador:").pack(pady=(0, 10))
+                        
+                        frame_scroll = ctk.CTkScrollableFrame(janela_sel)
+                        frame_scroll.pack(fill="both", expand=True, padx=10, pady=5)
+                        
+                        vars_arquivos = {}
+                        for arq in arquivos_validos:
+                            url_doc = arq.get("url")
+                            titulo = arq.get("titulo", "documento")
+                            if url_doc:
+                                var_chk = tk.BooleanVar(value=False)
+                                vars_arquivos[url_doc] = (var_chk, titulo)
+                                ctk.CTkCheckBox(frame_scroll, text=titulo, variable=var_chk).pack(anchor="w", padx=10, pady=5)
+
+                        def carregar_local():
+                            file_paths = filedialog.askopenfilenames(
+                                parent=janela_sel,
+                                title="Selecione os Editais/Anexos na sua máquina",
+                                filetypes=[("Arquivos de Texto e PDF", "*.pdf *.doc *.docx *.txt")]
+                            )
+                            if file_paths:
+                                arquivos_locais_selecionados.extend(file_paths)
+                                for u, (v, t) in vars_arquivos.items():
+                                    if v.get(): arquivos_escolhidos_pelo_user.append({"url": u, "titulo": t})
+                                janela_sel.destroy()
+                                evento_selecao.set() 
+
+                        def confirmar():
+                            for u, (v, t) in vars_arquivos.items():
+                                if v.get(): arquivos_escolhidos_pelo_user.append({"url": u, "titulo": t})
+                            janela_sel.destroy()
+                            evento_selecao.set() 
+
+                        def cancelar():
+                            estado_janela["cancelado"] = True
+                            janela_sel.destroy()
+                            evento_selecao.set()
+
+                        janela_sel.protocol("WM_DELETE_WINDOW", cancelar)
+                        
+                        frame_botoes = ctk.CTkFrame(janela_sel, fg_color="transparent")
+                        frame_botoes.pack(pady=15)
+                        
+                        ctk.CTkButton(frame_botoes, text="✖ Cancelar Análise", fg_color="#c0392b", hover_color="#e74c3c", command=cancelar).pack(side="left", padx=5)
+                        ctk.CTkButton(frame_botoes, text="📁 Carregar PDF do PC", fg_color="#3498db", hover_color="#2980b9", command=carregar_local).pack(side="left", padx=5)
+                        ctk.CTkButton(frame_botoes, text="Extrair Texto", fg_color="#2ecc71", hover_color="#27ae60", command=confirmar).pack(side="left", padx=5)
+
+                    self.after(0, abrir_modal_selecao)
+                    evento_selecao.wait() 
+
+                    if estado_janela["cancelado"]:
+                        self.registrar_log("🛑 Análise cancelada pelo utilizador. Nenhum limite da IA foi descontado.")
+                        self.after(0, lambda: self.btn_analise.configure(text="✨ Analisar com IA", state="normal", fg_color=self.cor_ia_normal))
+                        return
+
+                    if arquivos_escolhidos_pelo_user or arquivos_locais_selecionados:
+                        self.registrar_log(f"📄 Extraindo texto... ({len(arquivos_escolhidos_pelo_user)} online | {len(arquivos_locais_selecionados)} no PC)")
+                        
+                        for arq_selecionado in arquivos_escolhidos_pelo_user:
+                            try:
+                                self.registrar_log(f"📥 Lendo {arq_selecionado['titulo']}...")
+                                res_doc = self.http_session.get(arq_selecionado['url'], timeout=30)
+                                if res_doc.status_code == 200:
+                                    leitor = pypdf.PdfReader(io.BytesIO(res_doc.content))
+                                    pdf_texto_puro += f"\n\n{'='*40}\n--- DOCUMENTO: {arq_selecionado['titulo']} ---\n{'='*40}\n"
+                                    for i in range(min(150, len(leitor.pages))): 
+                                        ext = leitor.pages[i].extract_text()
+                                        if ext: pdf_texto_puro += ext + "\n"
+                            except Exception as epdf:
+                                self.registrar_log(f"⚠️ Erro ao ler o ficheiro online: {epdf}")
+
+                        for path_local in arquivos_locais_selecionados:
+                            nome_arq = os.path.basename(path_local)
+                            try:
+                                self.registrar_log(f"📥 Lendo do PC: {nome_arq}...")
+                                if path_local.lower().endswith('.pdf'):
+                                    with open(path_local, "rb") as f_pdf:
+                                        leitor = pypdf.PdfReader(f_pdf)
+                                        pdf_texto_puro += f"\n\n{'='*40}\n--- ARQUIVO LOCAL: {nome_arq} ---\n{'='*40}\n"
+                                        for i in range(min(150, len(leitor.pages))): 
+                                            ext = leitor.pages[i].extract_text()
+                                            if ext: pdf_texto_puro += ext + "\n"
+                                elif path_local.lower().endswith(('.txt', '.doc', '.docx')):
+                                    with open(path_local, "r", encoding="utf-8", errors="ignore") as f_txt:
+                                        pdf_texto_puro += f"\n\n{'='*40}\n--- ARQUIVO LOCAL: {nome_arq} ---\n{'='*40}\n"
+                                        pdf_texto_puro += f_txt.read() + "\n"
+                            except Exception as epdf:
+                                self.registrar_log(f"⚠️ Erro ao ler o ficheiro local {nome_arq}: {epdf}")
+
+                        if pdf_texto_puro.strip():
+                            texto_completo_novo = texto_resumo_pncp + "\n" + pdf_texto_puro
+                            fonte_detalhe = f"🌐 Resumo PNCP + Extração de PDFs"
+                            self.registrar_log("🧠 Iniciando Passagem 2 (Extração)...")
+                            resposta_ia, modelo_usado = chamar_ia(texto_completo_novo)
+                        else:
+                            self.registrar_log("⚠️ Nenhum texto pôde ser lido (Arquivo Escaneado ou Protegido).")
+
+            if not pdf_texto_puro:
+                pdf_texto_puro = "⚠️ Nenhuma extração de PDF foi efetuada ou os documentos eram imagens escaneadas impossíveis de ler em modo offline."
+
+            # =======================================================
+            # FINALIZAÇÃO JUSTA (Só cobra se houver qualidade)
+            # =======================================================
+            if resposta_ia:
+                faltas_finais = resposta_ia.lower().count("não mencionado") + resposta_ia.lower().count("não informado")
+                
+                if faltas_finais >= 6 and len(pdf_texto_puro.strip()) < 100:
+                    relatorio = "❌ ANÁLISE ABORTADA POR FALTA DE INFORMAÇÕES.\n\nO resumo oficial da licitação estava incompleto e não foi possível extrair texto legível dos anexos (os PDFs podem ser imagens escaneadas sem OCR).\n\n✅ NENHUM CRÉDITO DE IA FOI DESCONTADO DO SEU LIMITE DIÁRIO. Por favor, verifique o edital manualmente."
+                    self.registrar_log("❌ Análise inconclusiva por falta de texto. Limite diário preservado.")
+                else:
+                    try:
+                        requests.post(url_api_ia, json={"cnpj": self.cnpj_ativo, "hwid": str(uuid.getnode()), "maquina": platform.node(), "incrementar": True}, timeout=5)
+                    except: pass
+                    
+                    relatorio = f"🧠 ANÁLISE INTELIGENTE | Processado por IA\n"
                     relatorio += f"📡 FONTES ANALISADAS: {fonte_detalhe}\n"
                     relatorio += "="*80 + "\n\n"
                     relatorio += f"1️⃣ INFORMAÇÕES GERAIS E CONTRATUAIS\n"
@@ -942,9 +1015,8 @@ class BuscadorPNCP(ctk.CTk):
                     relatorio += "\n" + "="*80 + "\n\n"
                     
                     self.db.salvar_analise_ia(cnpj, ano, seq, relatorio)
-                else:
-                    relatorio = f"⚠️ FALHA TOTAL NOS SERVIDORES DE IA.\n\nTentativas falhadas:\n{erro_txt}"
-            # =====================================================================
+            else:
+                relatorio = "⚠️ FALHA TOTAL NOS SERVIDORES DE IA. Não foi possível gerar a análise.\n\n✅ Nenhum crédito foi descontado."
             
             self.after(0, lambda: self.mostrar_janela_analise(relatorio, pdf_texto_puro, arquivos_lista))
 
@@ -952,12 +1024,9 @@ class BuscadorPNCP(ctk.CTk):
             self.registrar_log(f"[ANALISE ERROR] {e}", apenas_terminal=True)
             self.after(0, lambda erro=str(e): messagebox.showerror("Erro", f"Erro na análise: {erro}"))
         finally:
-            self.after(0, lambda: self.btn_analise.configure(
-                text="✨ Analisar com IA", 
-                state="normal", 
-                fg_color=self.cor_ia_normal
-            ))
-
+            self.after(0, lambda: self.btn_analise.configure(text="✨ Analisar com IA", state="normal", fg_color=self.cor_ia_normal))
+            
+    ### FIM ANALISAR THREAD        
     def mostrar_janela_analise(self, relatorio_texto, texto_pdf, arquivos):
         janela_an = ctk.CTkToplevel(self)
         janela_an.title("Painel de Análise e Documentos Oficiais")
