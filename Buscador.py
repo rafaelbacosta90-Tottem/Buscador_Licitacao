@@ -30,7 +30,14 @@ try:
     HAS_PYPDF = True
 except ImportError:
     HAS_PYPDF = False
-
+    
+# Importação da biblioteca de calendário
+try:
+    from tkcalendar import Calendar
+    HAS_TKCALENDAR = True
+except ImportError:
+    HAS_TKCALENDAR = False
+    
 # Configuração visual do CustomTkinter (Design Moderno)
 ctk.set_appearance_mode("Light")
 ctk.set_default_color_theme("blue")
@@ -598,7 +605,7 @@ class BuscadorPNCP(ctk.CTk):
         self.registrar_log(f"[HTTP GET] Iniciando request -> {url}", apenas_terminal=True)
         self.registrar_log(f"           [PARAMS] {params}", apenas_terminal=True)
         
-        time.sleep(0.15) 
+        time.sleep(1.5) 
         
         for tentativa in range(1, max_tentativas + 1):
             if (self.cancelar_busca if tipo_operacao == "busca" else self.cancelar_carga): return None
@@ -606,7 +613,7 @@ class BuscadorPNCP(ctk.CTk):
                 res = self.http_session.get(url, params=params, timeout=(3.0, timeout))
                 
                 if res.status_code == 429:
-                    tempo_espera = tentativa * 10 
+                    tempo_espera = tentativa * 15 
                     self.registrar_log(f"[HTTP 429] 🛑 RATE LIMIT DO PNCP ALCANÇADO! Pausando por {tempo_espera}s...", apenas_terminal=True)
                     self.registrar_log(f"🛑 O Governo limitou o acesso por excesso de requisições. O robô vai aguardar {tempo_espera}s...", apenas_terminal=False)
                     for _ in range(int(tempo_espera * 10)):
@@ -1088,12 +1095,34 @@ class BuscadorPNCP(ctk.CTk):
         try: self.state('zoomed')
         except: self.attributes('-zoomed', True)
 
-        self.config_precos = {
-            "vlr_unit_est": tk.BooleanVar(value=True), "vlr_total_est": tk.BooleanVar(value=True), 
-            "vlr_unit_hom": tk.BooleanVar(value=True), "vlr_total_hom": tk.BooleanVar(value=True),
-            "media_orgao": tk.BooleanVar(value=True), "media_geral": tk.BooleanVar(value=True),
-            "ultimo_orgao": tk.BooleanVar(value=True), "ultimo_regiao": tk.BooleanVar(value=True)
+        self.colunas_mapa = {
+            "orgao": "Órgão / Unidade",
+            "uf": "UF (Estado)",
+            "portal": "Portal de Compra",
+            "edital": "Edital (Num/Ano)",
+            "modalidade_nome": "Modalidade",
+            "objeto": "Descrição do Item / Objeto",
+            "qtd": "Quantidade (Qtd)",
+            "vlr_unit_est": "Valor Unitário Estimado",
+            "vlr_total_est": "Valor Total Estimado",
+            "vlr_unit_hom": "Valor Unitário Homologado",
+            "vlr_total_hom": "Valor Total Homologado",
+            "media_orgao": "Média do Órgão (Últ. 12m)",
+            "media_geral": "Média Geral (Últ. 12m)",
+            "ultimo_orgao": "Último Vencedor (Órgão)",
+            "ultimo_regiao": "Último Vencedor (Região/UF)",
+            "data": "Data de Publicação",
+            "data_abertura": "Data de Abertura",
+            "data_encerramento": "Data de Encerramento"
         }
+        
+        # Carrega a configuração guardada na base de dados
+        self.config_colunas = {}
+        for col_id in self.colunas_mapa.keys():
+            valor_salvo = self.db.obter_config(f"col_{col_id}")
+            # Se for a primeira vez que abre (None), o padrão é True (mostrar tudo)
+            visivel = True if valor_salvo is None else (valor_salvo == "True")
+            self.config_colunas[col_id] = tk.BooleanVar(value=visivel)
         
         self.lista_portais_comuns = ["Compras.gov.br", "Portal de Compras Públicas", "BLL", "Licitações-e", "BEC", "Licitar Digital", "AZ Informática", "BBMNET", "BNC", "Portal de Compras da Caixa", "Licitanet", "Abase Sistemas", "Compras RS", "Compras SC", "Compras GO", "Ammfoco", "TCE", "Prefeitura"]
         self.vars_portais = {portal: tk.BooleanVar(value=False) for portal in self.lista_portais_comuns}
@@ -1174,6 +1203,7 @@ class BuscadorPNCP(ctk.CTk):
         self.menubar = tk.Menu(self)
         self.menu_opcoes = tk.Menu(self.menubar, tearoff=0)
         self.menu_opcoes.add_command(label="Configurar Colunas da Tabela", command=self.abrir_menu_configuracao)
+        self.menu_opcoes.add_command(label="Minhas Palavras-Chave", command=self.abrir_menu_palavras_chave) 
         self.menu_opcoes.add_separator()
         self.menubar.add_cascade(label="Opções", menu=self.menu_opcoes)
         
@@ -1188,22 +1218,58 @@ class BuscadorPNCP(ctk.CTk):
 
     def abrir_menu_configuracao(self):
         janela_config = ctk.CTkToplevel(self)
-        janela_config.title("Configurar Colunas de Preço")
-        janela_config.geometry("380x350")
+        janela_config.title("Configurar Colunas da Tabela")
+        janela_config.geometry("420x550")
         janela_config.transient(self) 
         janela_config.grab_set() 
-        lbl_titulo = ctk.CTkLabel(janela_config, text="Selecione as colunas a apresentar:", font=("Segoe UI", 12, "bold"))
+        
+        lbl_titulo = ctk.CTkLabel(janela_config, text="Marque as colunas que deseja exibir na tabela:", font=("Segoe UI", 12, "bold"))
         lbl_titulo.pack(pady=(15, 10))
-        ctk.CTkCheckBox(janela_config, text="Valor Unitário Estimado", variable=self.config_precos["vlr_unit_est"]).pack(anchor="w", padx=40, pady=5)
-        ctk.CTkCheckBox(janela_config, text="Valor Total Estimado", variable=self.config_precos["vlr_total_est"]).pack(anchor="w", padx=40, pady=5)
-        ctk.CTkCheckBox(janela_config, text="Valor Unitário Homologado", variable=self.config_precos["vlr_unit_hom"]).pack(anchor="w", padx=40, pady=5)
-        ctk.CTkCheckBox(janela_config, text="Valor Total Homologado", variable=self.config_precos["vlr_total_hom"]).pack(anchor="w", padx=40, pady=5)
-        ctk.CTkCheckBox(janela_config, text="Média do Órgão (Últ. 12 meses)", variable=self.config_precos["media_orgao"]).pack(anchor="w", padx=40, pady=5)
-        ctk.CTkCheckBox(janela_config, text="Média Geral (Últ. 12 meses)", variable=self.config_precos["media_geral"]).pack(anchor="w", padx=40, pady=5)
-        ctk.CTkCheckBox(janela_config, text="Último Preço Vencedor (Próprio Órgão)", variable=self.config_precos["ultimo_orgao"]).pack(anchor="w", padx=40, pady=5)
-        ctk.CTkCheckBox(janela_config, text="Último Preço Vencedor (Região/UF)", variable=self.config_precos["ultimo_regiao"]).pack(anchor="w", padx=40, pady=5)
-        ctk.CTkButton(janela_config, text="Aplicar e Fechar", command=lambda: [self.aplicar_colunas_grid(), janela_config.destroy()]).pack(pady=20)
+        
+        # Cria uma área com scroll porque agora são muitas colunas
+        frame_scroll = ctk.CTkScrollableFrame(janela_config)
+        frame_scroll.pack(fill="both", expand=True, padx=15, pady=5)
 
+        for col_id, nome_exibicao in self.colunas_mapa.items():
+            ctk.CTkCheckBox(frame_scroll, text=nome_exibicao, variable=self.config_colunas[col_id]).pack(anchor="w", padx=10, pady=5)
+            
+        def salvar_e_aplicar():
+            # Grava cada escolha individualmente no banco de dados local
+            for col_id, var in self.config_colunas.items():
+                self.db.salvar_config(f"col_{col_id}", str(var.get()))
+                
+            self.aplicar_colunas_grid()
+            messagebox.showinfo("Salvo", "As configurações das colunas foram guardadas com sucesso!", parent=janela_config)
+            janela_config.destroy()
+
+        ctk.CTkButton(janela_config, text="💾 Aplicar e Salvar Preferências", command=salvar_e_aplicar, fg_color="#27ae60", hover_color="#2ecc71", font=("Segoe UI", 12, "bold")).pack(pady=15)
+        
+    def abrir_menu_palavras_chave(self):
+        janela_palavras = ctk.CTkToplevel(self)
+        janela_palavras.title("Minhas Palavras-Chave")
+        janela_palavras.geometry("500x300")
+        janela_palavras.transient(self) 
+        janela_palavras.grab_set() 
+
+        ctk.CTkLabel(janela_palavras, text="Palavras-Chave para Busca Automática", font=("Segoe UI", 14, "bold")).pack(pady=(15, 5))
+        ctk.CTkLabel(janela_palavras, text="Se deixar a barra de pesquisa vazia, o sistema\nutilizará todas as palavras abaixo automaticamente.\n(Separe-as por vírgula)").pack(pady=(0, 15))
+
+        # Puxa as palavras criptografadas do banco local
+        palavras_salvas = self.db.obter_config("palavras_chave_busca") or ""
+        
+        txt_palavras = ctk.CTkTextbox(janela_palavras, height=100)
+        txt_palavras.pack(fill="x", padx=20, pady=5)
+        txt_palavras.insert("1.0", palavras_salvas)
+
+        def salvar():
+            novas_palavras = txt_palavras.get("1.0", "end").strip()
+            self.db.salvar_config("palavras_chave_busca", novas_palavras)
+            messagebox.showinfo("Sucesso", "Palavras-chave guardadas!\nDeixe a barra de pesquisa em branco para as utilizar automaticamente.", parent=janela_palavras)
+            janela_palavras.destroy()
+
+        ctk.CTkButton(janela_palavras, text="💾 Salvar Palavras-Chave", fg_color="#27ae60", hover_color="#2ecc71", command=salvar).pack(pady=20)
+    
+    
     def set_estado_menu_carga(self, em_andamento: bool):
         self.is_carga_running = em_andamento
         if em_andamento:
@@ -1304,12 +1370,11 @@ class BuscadorPNCP(ctk.CTk):
         self.registrar_log("🛑 Atualização em massa cancelada instantaneamente pelo utilizador.")
 
     def criar_interface(self):
-        # 🎨 MELHORIA DE DESIGN WINDOWS XP -> SISTEMA MODERNO FLAT
         style = ttk.Style()
-        style.theme_use("clam") # Remove visual antigo 3D
+        style.theme_use("clam")
         style.configure("Treeview", rowheight=35, font=("Segoe UI", 10), borderwidth=0, background="#ffffff", fieldbackground="#ffffff", foreground="#2f3640")
         style.configure("Treeview.Heading", font=("Segoe UI", 10, "bold"), background="#f1f2f6", foreground="#2c3e50", borderwidth=0, padding=4)
-        style.map("Treeview", background=[('selected', '#e0f7fa')], foreground=[('selected', '#000000')]) # Seleção moderna
+        style.map("Treeview", background=[('selected', '#e0f7fa')], foreground=[('selected', '#000000')])
         style.map("Treeview.Heading", background=[('active', '#dcdde1')])
 
         self.tabview = ctk.CTkTabview(self)
@@ -1324,7 +1389,7 @@ class BuscadorPNCP(ctk.CTk):
         self.lbl_termo = ctk.CTkLabel(self.frame_busca, text="Produto/Serviço (Termo de busca):", font=("Segoe UI", 12, "bold"))
         self.lbl_termo.grid(row=0, column=0, sticky="w", padx=5, pady=5)
 
-        self.ent_termo = ctk.CTkEntry(self.frame_busca, width=350, placeholder_text="Deixe vazio para extrair todo o Edital")
+        self.ent_termo = ctk.CTkEntry(self.frame_busca, width=350, placeholder_text="Digite o termo ou deixe vazio p/ usar palavras cadastradas")
         self.ent_termo.grid(row=0, column=1, columnspan=2, sticky="we", padx=5, pady=5)
         self.ent_termo.bind("<Return>", lambda e: self.iniciar_busca())
 
@@ -1343,17 +1408,37 @@ class BuscadorPNCP(ctk.CTk):
         data_ini_padrao = (data_atual - datetime.timedelta(days=7)).strftime("%d/%m/%Y")
         data_fim_padrao = data_atual.strftime("%d/%m/%Y")
 
-        self.lbl_data_ini = ctk.CTkLabel(self.frame_busca, text="Data Publicação (Início):")
-        self.lbl_data_ini.grid(row=1, column=0, sticky="w", padx=5, pady=5)
-        self.ent_data_ini = ctk.CTkEntry(self.frame_busca, width=120)
+        # NOVO: Dropdown de Tipo de Data
+        self.combo_tipo_data = ctk.CTkOptionMenu(self.frame_busca, values=["Publicação", "Abertura", "Encerramento"], width=130)
+        self.combo_tipo_data.set("Publicação")
+        self.combo_tipo_data.grid(row=1, column=0, sticky="w", padx=5, pady=5)
+        
+        # Mini-frame para a Data Inicial + Botão Calendário
+        frame_dt_ini = ctk.CTkFrame(self.frame_busca, fg_color="transparent")
+        frame_dt_ini.grid(row=1, column=1, sticky="w", padx=5, pady=5)
+        
+        self.ent_data_ini = ctk.CTkEntry(frame_dt_ini, width=95)
         self.ent_data_ini.insert(0, data_ini_padrao)
-        self.ent_data_ini.grid(row=1, column=1, sticky="w", padx=5, pady=5)
+        self.ent_data_ini.pack(side="left")
+        self.ent_data_ini.bind("<KeyRelease>", lambda e: self.aplicar_mascara_data(e, self.ent_data_ini))
+        
+        btn_cal_ini = ctk.CTkButton(frame_dt_ini, text="📅", width=30, fg_color="#3498db", hover_color="#2980b9", command=lambda: self.abrir_calendario(self.ent_data_ini))
+        btn_cal_ini.pack(side="left", padx=(3, 0))
 
-        self.lbl_data_fim = ctk.CTkLabel(self.frame_busca, text="Data Publicação (Fim):")
+        # Mini-frame para a Data Final + Botão Calendário
+        self.lbl_data_fim = ctk.CTkLabel(self.frame_busca, text="Até:")
         self.lbl_data_fim.grid(row=1, column=2, sticky="e", padx=5, pady=5)
-        self.ent_data_fim = ctk.CTkEntry(self.frame_busca, width=120)
+        
+        frame_dt_fim = ctk.CTkFrame(self.frame_busca, fg_color="transparent")
+        frame_dt_fim.grid(row=1, column=3, sticky="w", padx=5, pady=5)
+        
+        self.ent_data_fim = ctk.CTkEntry(frame_dt_fim, width=95)
         self.ent_data_fim.insert(0, data_fim_padrao)
-        self.ent_data_fim.grid(row=1, column=3, sticky="w", padx=5, pady=5)
+        self.ent_data_fim.pack(side="left")
+        self.ent_data_fim.bind("<KeyRelease>", lambda e: self.aplicar_mascara_data(e, self.ent_data_fim))
+        
+        btn_cal_fim = ctk.CTkButton(frame_dt_fim, text="📅", width=30, fg_color="#3498db", hover_color="#2980b9", command=lambda: self.abrir_calendario(self.ent_data_fim))
+        btn_cal_fim.pack(side="left", padx=(3, 0))
 
         self.lbl_status_edital = ctk.CTkLabel(self.frame_busca, text="Status do Edital:")
         self.lbl_status_edital.grid(row=1, column=4, sticky="e", padx=5, pady=5)
@@ -1406,31 +1491,26 @@ class BuscadorPNCP(ctk.CTk):
         self.lbl_status = ctk.CTkLabel(self.frame_head_tabela, text="Pronto para buscar.", text_color="#2ecc71", font=("Segoe UI", 11, "italic"))
         self.lbl_status.pack(side="left", padx=25)
         
-        # Botões de Ação no Topo
         self.btn_exportar = ctk.CTkButton(self.frame_head_tabela, text="📊 Exportar Excel", state="disabled", fg_color="#27ae60", width=130, command=self.exportar_excel)
         self.btn_exportar.pack(side="right", padx=5)
 
         self.cor_ia_normal = "#6c5ce7" 
         self.cor_ia_hover = "#a29bfe"  
         self.btn_analise = ctk.CTkButton(
-            self.frame_head_tabela, 
-            text="✨ Analisar com IA", 
-            width=140, 
+            self.frame_head_tabela, text="✨ Analisar com IA", width=140, 
             fg_color=self.cor_ia_normal, hover_color=self.cor_ia_hover, 
-            state="disabled", font=("Segoe UI", 12, "bold"), 
-            command=self.abrir_janela_analise
+            state="disabled", font=("Segoe UI", 12, "bold"), command=self.abrir_janela_analise
         )
         self.btn_analise.pack(side="right", padx=(5, 5))
-        # --- NOVO BOTÃO SININHO (Notificações) ---
+        
         self.btn_notificacoes = ctk.CTkButton(
             self.frame_head_tabela, text="🔔 (0)", width=60, 
-            fg_color="#e67e22", hover_color="#d35400", font=("Segoe UI", 12, "bold"),
-            command=self.abrir_janela_notificacoes
+            fg_color="#e67e22", hover_color="#d35400", font=("Segoe UI", 12, "bold"), command=self.abrir_janela_notificacoes
         )
         self.btn_notificacoes.pack(side="right", padx=(5, 15))
 
         # ======================================================================
-        # 1. RODAPÉ DE DETALHES (Empacotado primeiro para nunca sumir da tela)
+        # RODAPÉ DE DETALHES COM BOTÃO DE DISPUTA
         # ======================================================================
         self.frame_detalhes = ctk.CTkFrame(self.tab_pesquisa, fg_color="transparent")
         self.frame_detalhes.pack(side="bottom", fill="x", padx=10, pady=(2, 10))
@@ -1440,19 +1520,27 @@ class BuscadorPNCP(ctk.CTk):
         self.txt_detalhes.insert("end", "Selecione um item na tabela acima para visualizar a descrição multilinha aqui.")
         self.txt_detalhes.configure(state="disabled")
 
+        self.btn_portal_disputa = ctk.CTkButton(
+            self.frame_detalhes, text="🌐 Abrir Portal\nde Disputa", width=130, height=100,
+            fg_color="#2980b9", hover_color="#1a5276", state="disabled", font=("Segoe UI", 11, "bold"),
+            command=self.abrir_portal_disputa
+        )
+        self.btn_portal_disputa.pack(side="right", padx=(5, 0))
+
         self.btn_arquivos = ctk.CTkButton(
-            self.frame_detalhes, text="📂 Ver Arquivos\n(PDF/Anexos)", width=140, height=100,
-            fg_color="#d35400", hover_color="#e67e22", state="disabled", font=("Segoe UI", 12, "bold"), command=self.abrir_janela_arquivos
+            self.frame_detalhes, text="📂 Ver Arquivos\n(PDF/Anexos)", width=130, height=100,
+            fg_color="#d35400", hover_color="#e67e22", state="disabled", font=("Segoe UI", 11, "bold"), command=self.abrir_janela_arquivos
         )
         self.btn_arquivos.pack(side="right", padx=(5, 0))
 
         # ======================================================================
-        # 2. TABELA MODERNIZADA (Preenche inteligentemente o espaço que sobrou)
+        # TABELA MODERNIZADA (Inclui UASG Oculto)
         # ======================================================================
         self.frame_tabela = ctk.CTkFrame(self.tab_pesquisa)
         self.frame_tabela.pack(side="top", fill="both", expand=True, padx=10, pady=2)
 
-        colunas = ("orgao", "uf", "portal", "edital", "objeto", "qtd", "vlr_unit_est", "vlr_total_est", "vlr_unit_hom", "vlr_total_hom", "media_orgao", "media_geral", "ultimo_orgao", "ultimo_regiao", "data", "data_abertura", "data_encerramento", "cnpj", "ano", "seq", "modalidade_nome", "objeto_contrato")
+        # Adicionado o UASG como coluna invisível
+        colunas = ("orgao", "uf", "portal", "edital", "objeto", "qtd", "vlr_unit_est", "vlr_total_est", "vlr_unit_hom", "vlr_total_hom", "media_orgao", "media_geral", "ultimo_orgao", "ultimo_regiao", "data", "data_abertura", "data_encerramento", "cnpj", "ano", "seq", "modalidade_nome", "objeto_contrato", "uasg")
         self.tree = ttk.Treeview(self.frame_tabela, columns=colunas, show="headings")
         
         self.tree.heading("orgao", text="Órgão / Unidade")
@@ -1472,6 +1560,7 @@ class BuscadorPNCP(ctk.CTk):
         self.tree.heading("data_encerramento", text="Encerramento")
         self.tree.heading("media_orgao", text="Média Órgão (12m)")
         self.tree.heading("media_geral", text="Média Geral (12m)")
+        
                 
         self.tree.tag_configure('aderente', background='#d4efdf')
 
@@ -1505,28 +1594,63 @@ class BuscadorPNCP(ctk.CTk):
         scrollbar_y.pack(side="right", fill="y")
         self.tree.pack(side="top", fill="both", expand=True)
 
-        # ======================================================================
-        # 3. COMPORTAMENTOS E CLIQUES
-        # ======================================================================
         self.tree.bind("<<TreeviewSelect>>", self._ao_selecionar_tabela)
         self.tree.bind("<Double-1>", self._ao_duplo_clique_tabela)
         
         self.txt_logs = ctk.CTkTextbox(self.tab_logs, font=("Consolas", 11))
         self.txt_logs.pack(fill="both", expand=True, padx=10, pady=10)
         
-        # --- ALERTA DE VENCIMENTO DE LICENÇA (RODAPÉ INVISÍVEL) ---
         self.frame_alerta_licenca = ctk.CTkFrame(self, corner_radius=0, height=35)
-        
         self.lbl_alerta_licenca = ctk.CTkLabel(self.frame_alerta_licenca, text="", font=("Segoe UI", 13, "bold"))
         self.lbl_alerta_licenca.pack(side="left", padx=20, pady=5, expand=True)
-        
-        self.btn_fechar_alerta = ctk.CTkButton(
-            self.frame_alerta_licenca, text="✖ Fechar", width=80, height=28, 
-            fg_color="#c0392b", hover_color="#e74c3c", font=("Segoe UI", 12, "bold"), 
-            command=self.fechar_alerta_vencimento
-        )
+        self.btn_fechar_alerta = ctk.CTkButton(self.frame_alerta_licenca, text="✖ Fechar", width=80, height=28, fg_color="#c0392b", hover_color="#e74c3c", font=("Segoe UI", 12, "bold"), command=self.fechar_alerta_vencimento)
         self.btn_fechar_alerta.pack(side="right", padx=20, pady=5)
+    
+    # FIM CRIAR INTERFACE
+    
+    def aplicar_mascara_data(self, event, widget):
+        # Ignora teclas de apagar e navegação para permitir edição livre
+        if event.keysym in ("BackSpace", "Delete", "Left", "Right", "Up", "Down", "Tab"): 
+            return
+            
+        texto_atual = widget.get()
+        # Remove tudo o que não for número
+        texto_limpo = "".join([c for c in texto_atual if c.isdigit()])
+        
+        novo_texto = ""
+        for i, char in enumerate(texto_limpo):
+            if i in (2, 4):
+                novo_texto += "/"
+            novo_texto += char
+            if len(novo_texto) == 10:
+                break
+                
+        # Atualiza a caixa de texto se a máscara adicionou algo
+        if texto_atual != novo_texto:
+            widget.delete(0, "end")
+            widget.insert(0, novo_texto)
 
+    def abrir_calendario(self, entry_widget):
+        if not HAS_TKCALENDAR:
+            messagebox.showwarning("Dependência Necessária", "A biblioteca 'tkcalendar' não está instalada.\n\nAbra o terminal e digite:\npip install tkcalendar")
+            return
+            
+        janela_cal = ctk.CTkToplevel(self)
+        janela_cal.title("Selecionar Data")
+        janela_cal.geometry("320x300")
+        janela_cal.transient(self)
+        janela_cal.grab_set()
+        
+        cal = Calendar(janela_cal, selectmode='day', date_pattern='dd/mm/yyyy', locale='pt_BR')
+        cal.pack(pady=15, padx=15, fill="both", expand=True)
+        
+        def confirmar_data():
+            entry_widget.delete(0, "end")
+            entry_widget.insert(0, cal.get_date())
+            janela_cal.destroy()
+            
+        ctk.CTkButton(janela_cal, text="Confirmar", fg_color="#2ecc71", hover_color="#27ae60", font=("Segoe UI", 12, "bold"), command=confirmar_data).pack(pady=(0, 15))    
+        
     def _ordenar_coluna(self, col, reverse):
         lista = [(self.tree.set(k, col), k) for k in self.tree.get_children('')]
         def converter_valor(val):
@@ -1547,16 +1671,18 @@ class BuscadorPNCP(ctk.CTk):
         self.tree.heading(col, command=lambda: self._ordenar_coluna(col, not reverse))
 
     def aplicar_colunas_grid(self):
-        colunas_visiveis = ["orgao", "uf", "portal", "edital", "objeto", "qtd"]
-        if self.config_precos.get("vlr_unit_est", tk.BooleanVar(value=True)).get(): colunas_visiveis.append("vlr_unit_est")
-        if self.config_precos.get("vlr_total_est", tk.BooleanVar(value=True)).get(): colunas_visiveis.append("vlr_total_est")
-        if self.config_precos.get("vlr_unit_hom", tk.BooleanVar(value=True)).get(): colunas_visiveis.append("vlr_unit_hom")
-        if self.config_precos.get("vlr_total_hom", tk.BooleanVar(value=True)).get(): colunas_visiveis.append("vlr_total_hom")
-        if self.config_precos.get("media_orgao", tk.BooleanVar(value=True)).get(): colunas_visiveis.append("media_orgao")
-        if self.config_precos.get("media_geral", tk.BooleanVar(value=True)).get(): colunas_visiveis.append("media_geral")
-        if self.config_precos.get("ultimo_orgao", tk.BooleanVar(value=True)).get(): colunas_visiveis.append("ultimo_orgao")
-        if self.config_precos.get("ultimo_regiao", tk.BooleanVar(value=True)).get(): colunas_visiveis.append("ultimo_regiao")
-        colunas_visiveis.extend(["data", "data_abertura", "data_encerramento"])
+        colunas_visiveis = []
+        
+        # Reconstrói a lista de visualização com base naquilo que o utilizador marcou
+        for col_id in self.colunas_mapa.keys():
+            if self.config_colunas[col_id].get():
+                colunas_visiveis.append(col_id)
+        
+        # Trava de segurança: Se o utilizador desmarcar absolutamente tudo, o sistema exibe pelo menos o Órgão e o Objeto
+        if not colunas_visiveis:
+            colunas_visiveis = ["orgao", "edital", "objeto"]
+            
+        # O displaycolumns aplica a visibilidade e organiza na mesma ordem em que as colunas foram inseridas na lista
         self.tree.configure(displaycolumns=colunas_visiveis)
 
     def _on_chk_todos_portais_click(self):
@@ -1581,6 +1707,60 @@ class BuscadorPNCP(ctk.CTk):
         ctk.CTkFrame(frame_scroll, height=2, fg_color="gray").pack(fill="x", pady=5)
         for portal in self.lista_portais_comuns: ctk.CTkCheckBox(frame_scroll, text=portal, variable=self.vars_portais[portal], command=self._on_chk_portal_click).pack(anchor="w", padx=20, pady=4)
         ctk.CTkButton(janela_portais, text="Confirmar Filtro", command=janela_portais.destroy).pack(pady=15)
+
+    ## Abrir portal
+    def abrir_portal_disputa(self):
+        if not self.item_selecionado_doc: return
+        cnpj, ano, seq = self.item_selecionado_doc
+        self.btn_portal_disputa.configure(text="A buscar...", state="disabled")
+        threading.Thread(target=self._abrir_portal_thread, args=(cnpj, ano, seq), daemon=True).start()
+
+    def _abrir_portal_thread(self, cnpj, ano, seq):
+        try:
+            url_compra = f"https://pncp.gov.br/api/consulta/v1/orgaos/{cnpj}/compras/{ano}/{seq}"
+            res = self._get_com_retentativa(url_compra, params={}, timeout=10, tipo_operacao="busca")
+            link = ""
+            if res and res.status_code == 200:
+                link = res.json().get("linkSistemaOrigem", "")
+            
+            if link and link.startswith("http"):
+                webbrowser.open(link)
+            else:
+                self.after(0, lambda: messagebox.showinfo("Portal Direto", "O link direto não foi fornecido pelo órgão na plataforma. A abrir a página principal do edital no PNCP..."))
+                webbrowser.open(f"https://pncp.gov.br/app/editais/{cnpj}/{ano}/{seq}")
+        except Exception as e:
+            self.after(0, lambda erro=str(e): messagebox.showerror("Erro", f"Erro de conexão: {erro}"))
+        finally:
+            self.after(0, lambda: self.btn_portal_disputa.configure(text="🌐 Abrir Portal\nde Disputa", state="normal"))
+
+    def _ao_selecionar_tabela(self, event):
+        item_id = self.tree.focus()
+        if not item_id: return
+        valores = self.tree.item(item_id, "values")
+        if len(valores) >= 22:
+            orgao, uf, portal, edital_resumo, desc_item_completo = valores[0], valores[1], valores[2], valores[3], valores[4]
+            media_org, media_ger = valores[10], valores[11]
+            ult_org, ult_reg = valores[12], valores[13]
+            data_abertura, data_encerramento = valores[14], valores[15]
+            cnpj, ano, seq, mod_nome, objeto_geral = valores[17], valores[18], valores[19], valores[20], valores[21]
+            
+            self.item_selecionado_doc = (cnpj, ano, seq)
+            self.btn_arquivos.configure(state="normal")
+            self.btn_analise.configure(state="normal")
+            if hasattr(self, 'btn_portal_disputa'):
+                self.btn_portal_disputa.configure(state="normal")
+            
+            # Busca a UASG diretamente no banco local, sem sujar a tabela
+            linha_uasg = self.db.executar_leitura("SELECT uasg FROM editais_itens WHERE cnpj=? AND ano=? AND sequencial=? LIMIT 1", (cnpj, ano, seq))
+            uasg = linha_uasg[0][0] if (linha_uasg and linha_uasg[0][0]) else "N/I"
+            
+            aderencia_msg = "\n\n💡 PRODUTO ADERENTE: Este item tem alta probabilidade de corresponder aos serviços do seu CNPJ!" if desc_item_completo.startswith("⭐") else ""
+
+            texto_exibicao = f"🏢 ÓRGÃO: {orgao} ({uf})   |   🌐 PORTAL: {portal}\n📄 EDITAL: {edital_resumo}  |  ⚖️ MODALIDADE: {mod_nome}  |  🏷️ UASG: {uasg}\n🔗 Link: https://pncp.gov.br/app/editais/{cnpj}/{ano}/{seq}\n⏰ DISPUTA: Abertura em {data_abertura} - Encerramento em {data_encerramento}\n📊 PREÇO MÉDIO: No Órgão ({media_org})  |  Geral ({media_ger})\n🏆 ÚLTIMO VENCEDOR: No Órgão ({ult_org})  |  Na Região/UF ({ult_reg})\n🎯 OBJETO GERAL: {objeto_geral}\n📦 DESCRIÇÃO DO ITEM: {desc_item_completo}{aderencia_msg}"
+            self.txt_detalhes.configure(state="normal")
+            self.txt_detalhes.delete("1.0", "end")
+            self.txt_detalhes.insert("end", texto_exibicao)
+            self.txt_detalhes.configure(state="disabled")
 
     def obter_portais_selecionados(self):
         if self.vars_portais["Todos"].get(): return []
@@ -1611,28 +1791,7 @@ class BuscadorPNCP(ctk.CTk):
         self._renovar_sessao_http()
         self.registrar_log("🛑 Pesquisa interrompida instantaneamente.")
 
-    def _ao_selecionar_tabela(self, event):
-        item_id = self.tree.focus()
-        if not item_id: return
-        valores = self.tree.item(item_id, "values")
-        if len(valores) >= 22:
-            orgao, uf, portal, edital_resumo, desc_item_completo = valores[0], valores[1], valores[2], valores[3], valores[4]
-            media_org, media_ger = valores[10], valores[11]
-            ult_org, ult_reg = valores[12], valores[13]
-            data_abertura, data_encerramento = valores[14], valores[15]
-            cnpj, ano, seq, mod_nome, objeto_geral = valores[17], valores[18], valores[19], valores[20], valores[21]
-            
-            self.item_selecionado_doc = (cnpj, ano, seq)
-            self.btn_arquivos.configure(state="normal")
-            self.btn_analise.configure(state="normal")
-            
-            aderencia_msg = "\n\n💡 PRODUTO ADERENTE: Este item tem alta probabilidade de corresponder aos serviços do seu CNPJ!" if desc_item_completo.startswith("⭐") else ""
-
-            texto_exibicao = f"🏢 ÓRGÃO: {orgao} ({uf})   |   🌐 PORTAL: {portal}\n📄 EDITAL: {edital_resumo}  |  ⚖️ MODALIDADE: {mod_nome}  |  🔗 Link: https://pncp.gov.br/app/editais/{cnpj}/{ano}/{seq}\n⏰ DISPUTA: Abertura em {data_abertura} - Encerramento em {data_encerramento}\n📊 PREÇO MÉDIO: No Órgão ({media_org})  |  Geral ({media_ger})\n🏆 ÚLTIMO VENCEDOR: No Órgão ({ult_org})  |  Na Região/UF ({ult_reg})\n🎯 OBJETO GERAL: {objeto_geral}\n📦 DESCRIÇÃO DO ITEM: {desc_item_completo}{aderencia_msg}"
-            self.txt_detalhes.configure(state="normal")
-            self.txt_detalhes.delete("1.0", "end")
-            self.txt_detalhes.insert("end", texto_exibicao)
-            self.txt_detalhes.configure(state="disabled")
+    
 
     def _ao_duplo_clique_tabela(self, event):
         item_id = self.tree.focus()
@@ -1761,6 +1920,12 @@ class BuscadorPNCP(ctk.CTk):
         edital_busca = self.ent_edital.get().strip()
         uasg_busca = self.ent_uasg.get().strip()
         
+        if not termo:
+            palavras_salvas = self.db.obter_config("palavras_chave_busca")
+            if palavras_salvas:
+                termo = palavras_salvas.strip()
+                self.registrar_log("💡 Barra vazia detetada: A utilizar as suas Palavras-Chave cadastradas no filtro.")
+        
         if not termo and not edital_busca and not uasg_busca:
             return messagebox.showwarning("Aviso", "Informe o Produto/Serviço, o Nº do Edital ou a UASG/CNPJ.")
             
@@ -1771,6 +1936,11 @@ class BuscadorPNCP(ctk.CTk):
         
         self.btn_arquivos.configure(state="disabled")
         self.btn_analise.configure(state="disabled")
+        self.btn_portal_disputa.configure(state="disabled")
+
+        data_ini_br = self.ent_data_ini.get().strip()
+        data_fim_br = self.ent_data_fim.get().strip()
+        tipo_data = self.combo_tipo_data.get()
 
         if self.is_carga_running or self.chk_base_local.get() == 1:
             if self.is_carga_running:
@@ -1779,12 +1949,13 @@ class BuscadorPNCP(ctk.CTk):
                 self.lbl_status.configure(text="Busca Local forçada (Atualização em massa em andamento)...", text_color="#f39c12")
             else:
                 self.lbl_status.configure(text="Consultando Base Local...", text_color="#f39c12")
-            threading.Thread(target=self._buscar_local_db_thread, args=(termo, self.combo_uf.get(), self.modalidades_map.get(self.combo_modalidade.get()), self.combo_alvo.get(), self.obter_portais_selecionados(), edital_busca, uasg_busca), daemon=True).start()
+            threading.Thread(target=self._buscar_local_db_thread, args=(termo, data_ini_br, data_fim_br, tipo_data, self.combo_uf.get(), self.modalidades_map.get(self.combo_modalidade.get()), self.combo_alvo.get(), self.obter_portais_selecionados(), edital_busca, uasg_busca), daemon=True).start()
         else:
             self.lbl_status.configure(text="Consultando API do PNCP...", text_color="#f39c12")
-            threading.Thread(target=self._buscar_api_pncp_thread, args=(termo, Utils.formatar_data_api(self.ent_data_ini.get().strip()), Utils.formatar_data_api(self.ent_data_fim.get().strip()), self.combo_status.get(), self.modalidades_map.get(self.combo_modalidade.get()), self.combo_uf.get(), self.combo_alvo.get(), self.obter_portais_selecionados(), edital_busca, uasg_busca), daemon=True).start()
-
-    def _buscar_local_db_thread(self, termo, uf_selecionada, modalidade_id, alvo_busca, portais_selecionados, edital_busca, uasg_busca):
+            threading.Thread(target=self._buscar_api_pncp_thread, args=(termo, data_ini_br, data_fim_br, tipo_data, self.combo_status.get(), self.modalidades_map.get(self.combo_modalidade.get()), self.combo_uf.get(), self.combo_alvo.get(), self.obter_portais_selecionados(), edital_busca, uasg_busca), daemon=True).start()
+ 
+ 
+    def _buscar_local_db_thread(self, termo, data_ini_br, data_fim_br, tipo_data, uf_selecionada, modalidade_id, alvo_busca, portais_selecionados, edital_busca, uasg_busca):
         self.after(0, self._limpar_tabela)
         self.after(0, lambda: [self.txt_detalhes.configure(state="normal"), self.txt_detalhes.delete("1.0", "end"), self.txt_detalhes.configure(state="disabled")])
         
@@ -1792,9 +1963,14 @@ class BuscadorPNCP(ctk.CTk):
         count = 0
         self.registrar_log("🔎 Buscando na Base Local...")
 
+        try:
+            dt_ini_obj = datetime.datetime.strptime(data_ini_br, "%d/%m/%Y").date()
+            dt_fim_obj = datetime.datetime.strptime(data_fim_br, "%d/%m/%Y").date()
+        except:
+            dt_ini_obj = dt_fim_obj = None
+
         edital_limpo = edital_busca.strip()
-        busca_num = ""
-        busca_ano = ""
+        busca_num = busca_ano = ""
         if edital_limpo:
             partes = edital_limpo.split('/')
             busca_num = "".join(filter(str.isdigit, partes[0])).lstrip('0')
@@ -1814,6 +1990,20 @@ class BuscadorPNCP(ctk.CTk):
             
             for row in linhas:
                 if self.cancelar_busca: break
+                
+                if dt_ini_obj and dt_fim_obj:
+                    if tipo_data == "Publicação": data_alvo = str(row[9])
+                    elif tipo_data == "Abertura": data_alvo = str(row[10])
+                    else: data_alvo = str(row[11])
+                    
+                    if not data_alvo or data_alvo == "Não informada": continue
+                    try:
+                        p = data_alvo[:10].split('/')
+                        if len(p) == 3: dt_alvo_obj = datetime.date(int(p[2]), int(p[1]), int(p[0]))
+                        else: dt_alvo_obj = datetime.datetime.fromisoformat(data_alvo.split('.')[0]).date()
+                        if not (dt_ini_obj <= dt_alvo_obj <= dt_fim_obj): continue
+                    except: continue
+
                 if busca_num:
                     num_c_bruto = str(row[15])
                     num_c = "".join(filter(str.isdigit, num_c_bruto.split('|')[0] if '|' in num_c_bruto else num_c_bruto)).lstrip('0')
@@ -1843,8 +2033,9 @@ class BuscadorPNCP(ctk.CTk):
                 
             if not self.cancelar_busca: self.after(0, lambda: self._finalizar_busca_ui(count, f"{count} itens encontrados na Base Local."))
         except Exception as e: self.after(0, lambda erro=str(e): self._finalizar_busca_com_erro(erro))
-
-    def _buscar_api_pncp_thread(self, termo, data_inicio, data_fim, status_busca, modalidade_id, uf_selecionada, alvo_busca, portais_selecionados, edital_busca, uasg_busca):
+        
+        
+    def _buscar_api_pncp_thread(self, termo, data_ini_br, data_fim_br, tipo_data, status_busca, modalidade_id, uf_selecionada, alvo_busca, portais_selecionados, edital_busca, uasg_busca):
         self.after(0, self._limpar_tabela)
         self.after(0, lambda: [self.txt_detalhes.configure(state="normal"), self.txt_detalhes.delete("1.0", "end"), self.txt_detalhes.configure(state="disabled")])
         self.resultados_pncp = []
@@ -1852,11 +2043,26 @@ class BuscadorPNCP(ctk.CTk):
             grupos_busca = Utils.extrair_grupos_radicais(termo)
             self.registrar_log("🔎 Iniciando busca no PNCP Web...")
             url_base = "https://pncp.gov.br/api/consulta/v1/contratacoes/proposta" if status_busca == "A Receber/Recebendo Proposta" else "https://pncp.gov.br/api/consulta/v1/contratacoes/publicacao"
-            params_base = {"dataFinal": data_fim} if status_busca == "A Receber/Recebendo Proposta" else {"dataInicial": data_inicio, "dataFinal": data_fim}
+            
+            dt_ini_obj = dt_fim_obj = None
+            api_data_ini = Utils.formatar_data_api(data_ini_br)
+            api_data_fim = Utils.formatar_data_api(data_fim_br)
+            
+            try:
+                dt_ini_obj = datetime.datetime.strptime(data_ini_br, "%d/%m/%Y").date()
+                dt_fim_obj = datetime.datetime.strptime(data_fim_br, "%d/%m/%Y").date()
+                
+                # O PNCP só pesquisa nativamente pela Data de Publicação.
+                # Se o cliente escolher Abertura/Encerramento, alargamos a data para a API e filtramos localmente.
+                if tipo_data != "Publicação":
+                    api_data_ini = (dt_ini_obj - datetime.timedelta(days=60)).strftime("%Y%m%d")
+                    api_data_fim = (dt_fim_obj + datetime.timedelta(days=15)).strftime("%Y%m%d")
+            except: pass
+
+            params_base = {"dataFinal": api_data_fim} if status_busca == "A Receber/Recebendo Proposta" else {"dataInicial": api_data_ini, "dataFinal": api_data_fim}
             if uf_selecionada != "Todas": params_base["uf"] = uf_selecionada
             
             modalidades_buscar = [int(modalidade_id)] if modalidade_id else ([8, 6, 4] if not edital_busca and not uasg_busca else list(range(1, 15)))
-            self.registrar_log(f"[API ROUTINE] Modalidades em fila de busca: {modalidades_buscar}", apenas_terminal=True)
             
             for cod_modalidade in modalidades_buscar:
                 if self.cancelar_busca: break
@@ -1867,25 +2073,24 @@ class BuscadorPNCP(ctk.CTk):
                     params.update({"codigoModalidadeContratacao": str(cod_modalidade), "pagina": str(pag), "tamanhoPagina": "50"})
                     res = self._get_com_retentativa(url_base, params=params, timeout=15, tipo_operacao="busca")
                     if not res or res.status_code != 200 or not res.json().get("data"): break
-                    self._obter_e_salvar_itens_paginados(res.json().get("data"), set(), cod_modalidade, alvo_busca=alvo_busca, grupos_busca=grupos_busca, portais_selecionados=portais_selecionados, edital_busca=edital_busca, uasg_busca=uasg_busca, chaves_cadastradas=set(), tipo_operacao="busca")
+                    self._obter_e_salvar_itens_paginados(res.json().get("data"), set(), cod_modalidade, alvo_busca=alvo_busca, grupos_busca=grupos_busca, portais_selecionados=portais_selecionados, edital_busca=edital_busca, uasg_busca=uasg_busca, chaves_cadastradas=set(), tipo_operacao="busca", tipo_data=tipo_data, dt_ini_obj=dt_ini_obj, dt_fim_obj=dt_fim_obj)
                     if res.json().get("paginasRestantes", 0) <= 0: break
                     pag += 1
             
             if not self.cancelar_busca:
                 msg = f"{len(self.resultados_pncp)} itens online listados."
                 if len(self.resultados_pncp) == 0 and (edital_busca or uasg_busca):
-                    msg += " (Dica: Aumente o período da 'Data de Publicação' caso o edital seja antigo)"
+                    msg += " (Dica: Aumente o período da data caso o edital seja antigo)"
                 self.after(0, lambda: self._finalizar_busca_ui(len(self.resultados_pncp), msg))
         except Exception as e: 
             self.after(0, lambda erro=str(e): self._finalizar_busca_com_erro(erro))
-
-    def _obter_e_salvar_itens_paginados(self, lista_contratos, contratacoes_processadas, cod_modalidade, alvo_busca="Todos", grupos_busca=None, portais_selecionados=None, edital_busca="", uasg_busca="", chaves_cadastradas=None, tipo_operacao="busca"):
+            
+    def _obter_e_salvar_itens_paginados(self, lista_contratos, contratacoes_processadas, cod_modalidade, alvo_busca="Todos", grupos_busca=None, portais_selecionados=None, edital_busca="", uasg_busca="", chaves_cadastradas=None, tipo_operacao="busca", tipo_data="Publicação", dt_ini_obj=None, dt_fim_obj=None):
         if chaves_cadastradas is None: chaves_cadastradas = set()
         itens_salvos_count, mod_nome = 0, next((k for k, v in self.modalidades_map.items() if v == str(cod_modalidade)), "Não informada")
 
         edital_limpo = edital_busca.strip()
-        busca_num = ""
-        busca_ano = ""
+        busca_num = busca_ano = ""
         if edital_limpo:
             partes = edital_limpo.split('/')
             busca_num = "".join(filter(str.isdigit, partes[0])).lstrip('0')
@@ -1895,6 +2100,19 @@ class BuscadorPNCP(ctk.CTk):
 
         for contrato in lista_contratos:
             if (self.cancelar_busca if tipo_operacao == "busca" else self.cancelar_carga): break
+            
+            # FILTRO EXATO DE DATAS PARA A API DO PNCP
+            if dt_ini_obj and dt_fim_obj:
+                if tipo_data == "Abertura": data_alvo_str = contrato.get("dataAberturaProposta")
+                elif tipo_data == "Encerramento": data_alvo_str = contrato.get("dataEncerramentoProposta")
+                else: data_alvo_str = contrato.get("dataPublicacaoPncp")
+                
+                if not data_alvo_str: continue
+                try:
+                    dt_alvo_obj = datetime.datetime.fromisoformat(str(data_alvo_str).split('.')[0]).date()
+                    if not (dt_ini_obj <= dt_alvo_obj <= dt_fim_obj): continue
+                except: pass
+
             portal_nome = contrato.get("usuarioNome", "Não informado")
             if portais_selecionados and not any(ps.lower() in portal_nome.lower() for ps in portais_selecionados): continue 
             
@@ -1917,7 +2135,6 @@ class BuscadorPNCP(ctk.CTk):
                 ano_c = str(ano)
                 
                 if busca_ano and ano_c and busca_ano != ano_c: continue
-                    
                 if busca_num != num_c and busca_num != seq_c and busca_num != proc_c:
                     if not (num_c == busca_num + ano_c) and not (seq_c == busca_num + ano_c) and not (proc_c == busca_num + ano_c):
                         continue
@@ -1976,18 +2193,17 @@ class BuscadorPNCP(ctk.CTk):
                                 itens_salvos_count += 1
                                 
                                 if tipo_operacao == "carga" and itens_salvos_count % 50 == 0:
-                                    self.registrar_log(f"🔄 Carga Background: {itens_salvos_count} itens processados e guardados na Base Local...")
+                                    self.registrar_log(f"🔄 Carga Background: {itens_salvos_count} itens processados...")
                         
                         if (itens_json.get("paginasRestantes", 0) if isinstance(itens_json, dict) else 0) <= 0: break
                         pag_item += 1
                     except Exception:
-                        self.registrar_log(f"⚠️ Aviso: Falha ao baixar itens do edital {seq}/{ano}. Saltando...")
                         break
         if itens_salvos_count > 0:
             threading.Thread(target=self._enviar_telemetria_background, args=(itens_salvos_count,), daemon=True).start()
             
         return itens_salvos_count
-
+    
     def _adicionar_item_tabela(self, orgao, uf, portal, edital, desc, qtd, unit_est, total_est, unit_hom, total_hom, media_orgao, media_geral, ult_org, ult_reg, data_pub, data_abertura, data_encerramento, cnpj, ano, seq, mod_nome, obj_contrato):
         tags = ()
         texto_alvo = Utils.normalizar_texto(f"{desc} {obj_contrato}")
@@ -1999,7 +2215,7 @@ class BuscadorPNCP(ctk.CTk):
                 desc = f"⭐ {desc}"
 
         self.tree.insert("", "end", values=(orgao, uf, portal, edital, desc, qtd, unit_est, total_est, unit_hom, total_hom, media_orgao, media_geral, ult_org, ult_reg, data_pub, data_abertura, data_encerramento, cnpj, ano, seq, mod_nome, obj_contrato), tags=tags)
-
+        
     def _limpar_tabela(self):
         for row in self.tree.get_children(): self.tree.delete(row)
 
