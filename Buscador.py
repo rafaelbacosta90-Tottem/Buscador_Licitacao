@@ -529,11 +529,12 @@ class BuscadorPNCP(ctk.CTk):
             return False, None
 
         payload = {"cnpj": cnpj_licenca, 
-                   "hwid": str(uuid.getnode()), 
+                   "hwid": "ACESSO-GLOBAL", 
                    "maquina": platform.node(), 
                    "data_acesso": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 
                    "versao_atual": self.versao_local,
                    "ferramenta": "Buscador PNCP"}
+        
         self.registrar_log(f"[AUTH] Validando licença para CNPJ: {cnpj_licenca}", apenas_terminal=True)
         try:
             response = requests.post(self.url_api_licenca, json=payload, timeout=10)
@@ -605,7 +606,7 @@ class BuscadorPNCP(ctk.CTk):
                 res = self.http_session.get(url, params=params, timeout=(3.0, timeout))
                 
                 if res.status_code == 429:
-                    tempo_espera = tentativa * 3 
+                    tempo_espera = tentativa * 10 
                     self.registrar_log(f"[HTTP 429] 🛑 RATE LIMIT DO PNCP ALCANÇADO! Pausando por {tempo_espera}s...", apenas_terminal=True)
                     self.registrar_log(f"🛑 O Governo limitou o acesso por excesso de requisições. O robô vai aguardar {tempo_espera}s...", apenas_terminal=False)
                     for _ in range(int(tempo_espera * 10)):
@@ -778,7 +779,7 @@ class BuscadorPNCP(ctk.CTk):
             self.registrar_log("🔄 Verificando permissões e chaves na Nuvem (Sem descontar limite ainda)...")
             url_api_ia = self.url_api_licenca.replace("/valida", "/ia_uso") 
             
-            payload_verificacao = {"cnpj": self.cnpj_ativo, "hwid": str(uuid.getnode()), "maquina": platform.node(), "incrementar": False}
+            payload_verificacao = {"cnpj": self.cnpj_ativo, "hwid": "ACESSO-GLOBAL", "maquina": platform.node(), "incrementar": False}
             
             try:
                 res_api = requests.post(url_api_ia, json=payload_verificacao, timeout=10)
@@ -999,7 +1000,7 @@ class BuscadorPNCP(ctk.CTk):
                     self.registrar_log("❌ Análise inconclusiva por falta de texto. Limite diário preservado.")
                 else:
                     try:
-                        requests.post(url_api_ia, json={"cnpj": self.cnpj_ativo, "hwid": str(uuid.getnode()), "maquina": platform.node(), "incrementar": True}, timeout=5)
+                        requests.post(url_api_ia, json={"cnpj": self.cnpj_ativo, "hwid": "ACESSO-GLOBAL", "maquina": platform.node(), "incrementar": True}, timeout=5)
                     except: pass
                     
                     relatorio = f"🧠 ANÁLISE INTELIGENTE | Processado por IA\n"
@@ -1428,9 +1429,28 @@ class BuscadorPNCP(ctk.CTk):
         )
         self.btn_notificacoes.pack(side="right", padx=(5, 15))
 
-        # Tabela Modernizada
+        # ======================================================================
+        # 1. RODAPÉ DE DETALHES (Empacotado primeiro para nunca sumir da tela)
+        # ======================================================================
+        self.frame_detalhes = ctk.CTkFrame(self.tab_pesquisa, fg_color="transparent")
+        self.frame_detalhes.pack(side="bottom", fill="x", padx=10, pady=(2, 10))
+
+        self.txt_detalhes = ctk.CTkTextbox(self.frame_detalhes, height=100, font=("Segoe UI", 12), text_color="#2c3e50")
+        self.txt_detalhes.pack(side="left", fill="both", expand=True, padx=(0, 5))
+        self.txt_detalhes.insert("end", "Selecione um item na tabela acima para visualizar a descrição multilinha aqui.")
+        self.txt_detalhes.configure(state="disabled")
+
+        self.btn_arquivos = ctk.CTkButton(
+            self.frame_detalhes, text="📂 Ver Arquivos\n(PDF/Anexos)", width=140, height=100,
+            fg_color="#d35400", hover_color="#e67e22", state="disabled", font=("Segoe UI", 12, "bold"), command=self.abrir_janela_arquivos
+        )
+        self.btn_arquivos.pack(side="right", padx=(5, 0))
+
+        # ======================================================================
+        # 2. TABELA MODERNIZADA (Preenche inteligentemente o espaço que sobrou)
+        # ======================================================================
         self.frame_tabela = ctk.CTkFrame(self.tab_pesquisa)
-        self.frame_tabela.pack(fill="both", expand=True, padx=10, pady=2)
+        self.frame_tabela.pack(side="top", fill="both", expand=True, padx=10, pady=2)
 
         colunas = ("orgao", "uf", "portal", "edital", "objeto", "qtd", "vlr_unit_est", "vlr_total_est", "vlr_unit_hom", "vlr_total_hom", "media_orgao", "media_geral", "ultimo_orgao", "ultimo_regiao", "data", "data_abertura", "data_encerramento", "cnpj", "ano", "seq", "modalidade_nome", "objeto_contrato")
         self.tree = ttk.Treeview(self.frame_tabela, columns=colunas, show="headings")
@@ -1485,20 +1505,9 @@ class BuscadorPNCP(ctk.CTk):
         scrollbar_y.pack(side="right", fill="y")
         self.tree.pack(side="top", fill="both", expand=True)
 
-        self.frame_detalhes = ctk.CTkFrame(self.tab_pesquisa, fg_color="transparent")
-        self.frame_detalhes.pack(fill="x", padx=10, pady=(2, 10))
-
-        self.txt_detalhes = ctk.CTkTextbox(self.frame_detalhes, height=100, font=("Segoe UI", 12), text_color="#2c3e50")
-        self.txt_detalhes.pack(side="left", fill="both", expand=True, padx=(0, 5))
-        self.txt_detalhes.insert("end", "Selecione um item na tabela acima para visualizar a descrição multilinha aqui.")
-        self.txt_detalhes.configure(state="disabled")
-
-        self.btn_arquivos = ctk.CTkButton(
-            self.frame_detalhes, text="📂 Ver Arquivos\n(PDF/Anexos)", width=140, height=100,
-            fg_color="#d35400", hover_color="#e67e22", state="disabled", font=("Segoe UI", 12, "bold"), command=self.abrir_janela_arquivos
-        )
-        self.btn_arquivos.pack(side="right", padx=(5, 0))
-
+        # ======================================================================
+        # 3. COMPORTAMENTOS E CLIQUES
+        # ======================================================================
         self.tree.bind("<<TreeviewSelect>>", self._ao_selecionar_tabela)
         self.tree.bind("<Double-1>", self._ao_duplo_clique_tabela)
         
