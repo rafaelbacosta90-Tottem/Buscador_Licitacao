@@ -11,6 +11,6 @@ Versoes
 8.11 - A partir de agora, se premir a combinação de teclas Ctrl + Shift + T em qualquer momento enquanto o programa estiver aberto, surgirá um ecrã de segurança. Ao inserir a palavra-passe suporte@2026, abrir-se-á um Terminal de Logs Detalhado (estilo "Matrix" - fundo escuro e letras verdes) que espelha e captura todas as ações do sistema em tempo real, sem interferir com a utilização do cliente.
 8.14 - Busca por editais e UASG
 9.4.0 - Implemetação de 2 IAs(Dots3 e Gemini), cadastro de termos chaves para alertas em tela e por email
-
+9.9 - Melhoria nos filtros
 
 

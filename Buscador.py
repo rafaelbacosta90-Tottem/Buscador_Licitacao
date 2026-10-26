@@ -393,7 +393,7 @@ class BuscadorPNCP(ctk.CTk):
     def __init__(self):
         super().__init__()
 
-        self.versao_local = "9.4.0"
+        self.versao_local = "9.10"
         self.title(f"Buscador Multi-Portal de Licitações & Preços - Compras Públicas | Versão {self.versao_local}")
         self.geometry("1180x920")
         
@@ -480,26 +480,47 @@ class BuscadorPNCP(ctk.CTk):
             
             else: self.solicitar_registro_cnpj()
 
+    def _parse_version(self, v_str):
+        """Converte strings de versão como '9.9.0' em tuplas de inteiros (9, 9, 0) para comparação correta."""
+        try:
+            return tuple(map(int, re.findall(r'\d+', str(v_str))))
+        except Exception:
+            return (0, 0, 0)
+
     def verificar_versao_inicial(self):
         try:
             self.registrar_log("[SYSTEM] Verificando atualizações OTA...", apenas_terminal=True)
             res = requests.get(self.url_api_versao, timeout=5)
-            if res.status_code != 200: return True 
+            if res.status_code != 200: 
+                return True 
+                
             dados = res.json()
-            versao_nuvem = dados.get("versao_atual", self.versao_local)
-            versao_minima = dados.get("versao_minima_obrigatoria", "0.0")
+            versao_nuvem_str = str(dados.get("versao_atual", self.versao_local))
+            versao_minima_str = str(dados.get("versao_minima_obrigatoria", "0.0"))
             link_download = dados.get("url_download")
 
-            if float(self.versao_local) < float(versao_minima):
-                messagebox.showerror("Atualização Obrigatória", f"A sua versão foi descontinuada.\nO sistema será atualizado agora para a versão {versao_nuvem}.")
+            v_local = self._parse_version(self.versao_local)
+            v_nuvem = self._parse_version(versao_nuvem_str)
+            v_minima = self._parse_version(versao_minima_str)
+
+            if v_local < v_minima:
+                messagebox.showerror(
+                    "Atualização Obrigatória", 
+                    f"A sua versão ({self.versao_local}) foi descontinuada.\nO sistema será atualizado agora para a versão {versao_nuvem_str}."
+                )
                 self.executar_download_e_atualizacao(link_download)
                 return False 
-            elif float(self.versao_local) < float(versao_nuvem):
-                if messagebox.askyesno("Atualização Disponível", f"Nova versão {versao_nuvem} encontrada!\n\nDeseja atualizar o sistema agora? (Recomendado)"):
+            elif v_local < v_nuvem:
+                if messagebox.askyesno(
+                    "Atualização Disponível", 
+                    f"Nova versão {versao_nuvem_str} encontrada!\nSua versão atual é: {self.versao_local}\n\nDeseja atualizar o sistema agora? (Recomendado)"
+                ):
                     self.executar_download_e_atualizacao(link_download)
                     return False
             return True
-        except: return True 
+        except Exception as e:
+            self.registrar_log(f"[OTA ERROR] Falha ao verificar versão: {e}", apenas_terminal=True)
+            return True
 
     def executar_download_e_atualizacao(self, link_download):
         try:
@@ -613,7 +634,7 @@ class BuscadorPNCP(ctk.CTk):
                 res = self.http_session.get(url, params=params, timeout=(3.0, timeout))
                 
                 if res.status_code == 429:
-                    tempo_espera = tentativa * 15 
+                    tempo_espera = tentativa * 25 
                     self.registrar_log(f"[HTTP 429] 🛑 RATE LIMIT DO PNCP ALCANÇADO! Pausando por {tempo_espera}s...", apenas_terminal=True)
                     self.registrar_log(f"🛑 O Governo limitou o acesso por excesso de requisições. O robô vai aguardar {tempo_espera}s...", apenas_terminal=False)
                     for _ in range(int(tempo_espera * 10)):
